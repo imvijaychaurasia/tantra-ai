@@ -14,7 +14,7 @@
 
 general_settings:
   master_key: "os.environ/LITELLM_MASTER_KEY"
-  database_url: null                      # Stateless config only
+  database_url: "postgresql://tantra:tantradevtestkey@postgres:5432/tantra"
   disable_spend_logs: false
   disable_master_key_return: true
 
