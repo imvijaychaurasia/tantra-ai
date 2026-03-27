@@ -1,0 +1,87 @@
+# =============================================================================
+# Tantra AI — .gitignore
+# =============================================================================
+
+# Secrets — NEVER commit these
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+.venv/
+venv/
+env/
+ENV/
+pip-wheel-metadata/
+
+# Pytest / coverage
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# MyPy / type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Ruff / linters
+.ruff_cache/
+
+# Node (if any JS tooling)
+node_modules/
+.npm/
+dist/
+
+# Docker volumes (local data — excluded from git)
+data/postgres/
+data/redis/
+data/qdrant/
+data/models/
+data/uploads/
+
+# Ollama model cache
+*.gguf
+*.ggml
+*.bin
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Alembic (keep structure, ignore auto-migrations)
+alembic/versions/*.pyc
+
+# Jupyter notebooks
+.ipynb_checkpoints/
+*.ipynb
+
+# Test artifacts
+test-results/
+playwright-report/
+
+# Compiled assets
+*.css.map
+*.js.map

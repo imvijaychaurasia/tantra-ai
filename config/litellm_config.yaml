@@ -1,0 +1,216 @@
+# =============================================================================
+# Tantra AI — LiteLLM Proxy Configuration
+# तंत्र  ·  Universal model gateway
+# =============================================================================
+# Model tier aliases:
+#   frontier  →  Best available (cloud preferred, Llama 70B fallback)
+#   director  →  Senior reasoning (Llama 3.3 70B local)
+#   manager   →  Mid-tier reasoning (Qwen 2.5 72B local)
+#   worker    →  Efficient executor (Phi-4 14B local)
+#   coder     →  Code specialist (DeepSeek Coder V2 local)
+#   fast      →  Ultra-fast responses (Mistral Nemo local)
+#   embedder  →  Embeddings (nomic-embed-text local)
+# =============================================================================
+
+general_settings:
+  master_key: "os.environ/LITELLM_MASTER_KEY"
+  database_url: null                      # Stateless config only
+  disable_spend_logs: false
+  disable_master_key_return: true
+
+litellm_settings:
+  set_verbose: false
+  json_logs: true
+  request_timeout: 600                    # 10 min for long agent chains
+  num_retries: 3
+  fallbacks:
+    - frontier: ["director", "manager"]   # If cloud fails → local fallback
+  drop_params: true                       # Ignore unsupported params silently
+
+router_settings:
+  routing_strategy: "latency-based-routing"
+  model_group_alias:
+    # Short aliases that agents use in code
+    gpt4: "frontier"
+    claude: "frontier"
+    llama70b: "director"
+    qwen72b: "manager"
+    phi4: "worker"
+    mistral: "fast"
+
+model_list:
+
+  # ---------------------------------------------------------------------------
+  # FRONTIER — Strategic reasoning, final decisions, complex planning
+  # Preferred: Claude 3.5 Sonnet (Anthropic) or GPT-4o (OpenAI)
+  # Fallback:  Llama 3.3 70B (local) when no API key
+  # ---------------------------------------------------------------------------
+  - model_name: frontier
+    litellm_params:
+      model: anthropic/claude-3-5-sonnet-20241022
+      api_key: "os.environ/ANTHROPIC_API_KEY"
+      max_tokens: 8192
+      temperature: 0.7
+    model_info:
+      description: "CAIO and C-suite agents — strategic decisions"
+
+  - model_name: frontier
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: "os.environ/OPENAI_API_KEY"
+      max_tokens: 8192
+      temperature: 0.7
+    model_info:
+      description: "Frontier fallback via OpenAI"
+
+  # Local frontier fallback — mistral-nemo (best available on this Mac setup)
+  # Switch to ollama/llama3.3:70b when on Linux/NVIDIA with 64 GB+ RAM
+  - model_name: frontier
+    litellm_params:
+      model: ollama/mistral-nemo:12b
+      api_base: "http://ollama:11434"
+      stream: true
+    model_info:
+      description: "Local frontier fallback — Mistral Nemo (Mac small-model mode)"
+
+  # ---------------------------------------------------------------------------
+  # DIRECTOR — Department heads, task planning, subordinate coordination
+  # Mac mode: mistral-nemo:12b  |  Linux/NVIDIA: llama3.3:70b
+  # ---------------------------------------------------------------------------
+  - model_name: director
+    litellm_params:
+      model: ollama/phi4:14b
+      api_base: "http://ollama:11434"
+      stream: true
+      max_tokens: 4096
+      temperature: 0.6
+    model_info:
+      description: "CMO, CTO, CFO — department-level planning (phi4 Mac mode)"
+
+  # Groq fast alternative for director tier (use if GROQ_API_KEY set)
+  - model_name: director
+    litellm_params:
+      model: groq/llama-3.3-70b-versatile
+      api_key: "os.environ/GROQ_API_KEY"
+      max_tokens: 4096
+      temperature: 0.6
+    model_info:
+      description: "Director via Groq cloud — llama3.3:70b fast inference"
+
+  # Director local fallback
+  - model_name: director
+    litellm_params:
+      model: ollama/mistral-nemo:12b
+      api_base: "http://ollama:11434"
+      stream: true
+      max_tokens: 4096
+      temperature: 0.6
+    model_info:
+      description: "Director local fallback — Mistral Nemo"
+
+  # ---------------------------------------------------------------------------
+  # MANAGER — Mid-level agents, multi-step execution, sub-task management
+  # Mac mode: phi4:14b  |  Linux: qwen2.5:72b
+  # ---------------------------------------------------------------------------
+  - model_name: manager
+    litellm_params:
+      model: ollama/phi4:14b
+      api_base: "http://ollama:11434"
+      stream: true
+      max_tokens: 4096
+      temperature: 0.5
+    model_info:
+      description: "Research leads, content managers (phi4 Mac mode)"
+
+  # Manager fallback
+  - model_name: manager
+    litellm_params:
+      model: ollama/mistral-nemo:12b
+      api_base: "http://ollama:11434"
+      stream: true
+      max_tokens: 4096
+      temperature: 0.5
+    model_info:
+      description: "Manager fallback — Mistral Nemo"
+
+  # ---------------------------------------------------------------------------
+  # WORKER — Focused single-task execution
+  # Model: Phi-4 14B (local) — efficient, quality single-task model
+  # ---------------------------------------------------------------------------
+  - model_name: worker
+    litellm_params:
+      model: ollama/phi4:14b
+      api_base: "http://ollama:11434"
+      stream: true
+      max_tokens: 2048
+      temperature: 0.4
+    model_info:
+      description: "Execution agents — post writers, schedulers, analyzers"
+
+  # Worker fallback
+  - model_name: worker
+    litellm_params:
+      model: ollama/mistral-nemo:12b
+      api_base: "http://ollama:11434"
+      stream: true
+      max_tokens: 2048
+      temperature: 0.4
+    model_info:
+      description: "Worker fallback — Mistral Nemo"
+
+  # ---------------------------------------------------------------------------
+  # CODER — Code generation, debugging, infra scripting
+  # Mac mode: phi4:14b (good at code)  |  Linux: deepseek-coder-v2:16b
+  # ---------------------------------------------------------------------------
+  - model_name: coder
+    litellm_params:
+      model: ollama/phi4:14b
+      api_base: "http://ollama:11434"
+      stream: true
+      max_tokens: 4096
+      temperature: 0.2
+    model_info:
+      description: "Code agents — phi4 is strong on code tasks (Mac mode)"
+
+  # ---------------------------------------------------------------------------
+  # FAST — Ultra-low latency for reactive/classification tasks
+  # Model: Mistral Nemo (local) — 12B, super fast
+  # ---------------------------------------------------------------------------
+  - model_name: fast
+    litellm_params:
+      model: ollama/mistral-nemo:12b
+      api_base: "http://ollama:11434"
+      stream: true
+      max_tokens: 1024
+      temperature: 0.3
+    model_info:
+      description: "Classifiers, routers, quick-response agents"
+
+  # Groq mixtral as fast fallback
+  - model_name: fast
+    litellm_params:
+      model: groq/mixtral-8x7b-32768
+      api_key: "os.environ/GROQ_API_KEY"
+      max_tokens: 1024
+      temperature: 0.3
+    model_info:
+      description: "Fast cloud fallback via Groq"
+
+  # ---------------------------------------------------------------------------
+  # EMBEDDER — Text embeddings for semantic memory and RAG
+  # Model: nomic-embed-text (local, 768-dim)
+  # ---------------------------------------------------------------------------
+  - model_name: embedder
+    litellm_params:
+      model: ollama/nomic-embed-text
+      api_base: "http://ollama:11434"
+    model_info:
+      description: "Embedding model for Qdrant + mem0"
+
+  # OpenAI embeddings as fallback
+  - model_name: embedder
+    litellm_params:
+      model: openai/text-embedding-3-small
+      api_key: "os.environ/OPENAI_API_KEY"
+    model_info:
+      description: "OpenAI embedding fallback (1536-dim)"

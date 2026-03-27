@@ -1,0 +1,411 @@
+# =============================================================================
+# Tantra AI — docker-compose.yml
+# तंत्र  ·  Local Autonomous Agent Intelligence Stack
+# =============================================================================
+# Platform:  Apple Silicon (arm64) primary, Linux amd64 compatible
+# Future:    Linux + NVIDIA GPU → docker-compose.nvidia.yml override
+#
+# Services (12 total):
+#   Core data:     postgres, redis, qdrant
+#   Model layer:   ollama, litellm
+#   App layer:     tantra-api, celery-worker, celery-beat
+#   UI layer:      open-webui, n8n, flower (Celery UI), ttyd (web terminal)
+#
+# Quick start:
+#   make up-core     → infra only (postgres + redis + qdrant + ollama + litellm)
+#   make up          → everything
+#   make pull-models → download Ollama models after up-core
+# =============================================================================
+
+# version field removed — obsolete in Docker Compose v2 (auto-detected)
+
+x-restart: &restart
+  restart: unless-stopped
+
+x-hc: &hc
+  interval: 30s
+  timeout: 10s
+  retries: 5
+  start_period: 40s
+
+networks:
+  tantra-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  ollama-data:
+  postgres-data:
+  redis-data:
+  qdrant-data:
+  n8n-data:
+  openwebui-data:
+
+# =============================================================================
+services:
+
+  # ---------------------------------------------------------------------------
+  # 1. POSTGRES 16 — Primary relational store
+  # ---------------------------------------------------------------------------
+  postgres:
+    <<: *restart
+    image: postgres:16-alpine
+    container_name: tantra-postgres
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./data/postgres:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-tantra}
+      POSTGRES_USER: ${POSTGRES_USER:-tantra}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-tantra_secret}
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8"
+    networks:
+      tantra-net:
+        ipv4_address: 172.28.0.12
+    healthcheck:
+      <<: *hc
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-tantra} -d ${POSTGRES_DB:-tantra}"]
+
+  # ---------------------------------------------------------------------------
+  # 2. REDIS 7 — Celery broker + cache + pub/sub
+  # ---------------------------------------------------------------------------
+  redis:
+    <<: *restart
+    image: redis:7-alpine
+    container_name: tantra-redis
+    volumes:
+      - redis-data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory ${REDIS_MAX_MEMORY:-2gb}
+      --maxmemory-policy allkeys-lru
+      --requirepass ${REDIS_PASSWORD:-tantra_redis_secret}
+    networks:
+      tantra-net:
+        ipv4_address: 172.28.0.13
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-tantra_redis_secret}", "ping"]
+
+  # ---------------------------------------------------------------------------
+  # 3. QDRANT — Vector database for embeddings + semantic memory
+  # ---------------------------------------------------------------------------
+  qdrant:
+    <<: *restart
+    image: qdrant/qdrant:latest
+    container_name: tantra-qdrant
+    volumes:
+      - qdrant-data:/qdrant/storage
+    ports:
+      - "${QDRANT_HTTP_PORT:-6333}:6333"
+      - "${QDRANT_GRPC_PORT:-6334}:6334"
+    networks:
+      tantra-net:
+        ipv4_address: 172.28.0.14
+    healthcheck:
+      # qdrant image is pure Rust (no curl/wget) — use bash TCP check
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/6333' 2>/dev/null && exit 0 || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # ---------------------------------------------------------------------------
+  # 4. OLLAMA — Local LLM serving (Metal GPU on Apple Silicon)
+  # ---------------------------------------------------------------------------
+  ollama:
+    <<: *restart
+    image: ollama/ollama:latest
+    container_name: tantra-ollama
+    volumes:
+      - ollama-data:/root/.ollama
+    ports:
+      - "${OLLAMA_PORT:-11434}:11434"
+    environment:
+      OLLAMA_HOST: "0.0.0.0"
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-24h}
+      # Mac: 1 model at a time to stay within Docker Desktop RAM (~8-12 GB)
+      # Linux/NVIDIA: set these to 2+ in .env for parallel inference
+      OLLAMA_NUM_PARALLEL: ${OLLAMA_NUM_PARALLEL:-1}
+      OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-1}
+    networks:
+      tantra-net:
+        ipv4_address: 172.28.0.10
+    healthcheck:
+      # ollama/ollama image has no curl — use the built-in CLI instead
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # 5. LITELLM — Universal OpenAI-compatible model proxy
+  #    Tiers: frontier / director / manager / worker / coder / fast / embedder
+  # ---------------------------------------------------------------------------
+  litellm:
+    <<: *restart
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: tantra-litellm
+    depends_on:
+      ollama:
+        condition: service_healthy
+    volumes:
+      - ./config/litellm_config.yaml:/app/config.yaml:ro
+    ports:
+      - "${LITELLM_PORT:-4000}:4000"
+    environment:
+      LITELLM_CONFIG: /app/config.yaml
+      STORE_MODEL_IN_DB: "False"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      TOGETHER_API_KEY: ${TOGETHER_API_KEY:-}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-tantra-master-key}
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
+    networks:
+      tantra-net:
+        ipv4_address: 172.28.0.11
+    healthcheck:
+      # litellm image is python-slim (no curl/wget) — use Python urllib instead
+      # /health/liveliness returns 200 "I'm alive!" regardless of model state
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')\" 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 60s
+
+  # ---------------------------------------------------------------------------
+  # 6. TANTRA API — FastAPI (REST + WebSocket + Auth)
+  # ---------------------------------------------------------------------------
+  tantra-api:
+    <<: *restart
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: api
+      args:
+        BUILDPLATFORM: linux/arm64
+    container_name: tantra-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src:ro
+      - ./config:/app/config:ro
+      - ./data/uploads:/app/uploads
+    ports:
+      - "${API_PORT:-8000}:8000"
+    env_file: .env
+    environment:
+      PYTHONPATH: /app/src
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-tantra}:${POSTGRES_PASSWORD:-tantra_secret}@postgres:5432/${POSTGRES_DB:-tantra}
+      DATABASE_SYNC_URL: postgresql://${POSTGRES_USER:-tantra}:${POSTGRES_PASSWORD:-tantra_secret}@postgres:5432/${POSTGRES_DB:-tantra}
+      REDIS_URL: redis://:${REDIS_PASSWORD:-tantra_redis_secret}@redis:6379/0
+      QDRANT_HOST: qdrant
+      QDRANT_PORT: "6333"
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-tantra-master-key}
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-tantra_redis_secret}@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-tantra_redis_secret}@redis:6379/2
+      LOG_FORMAT: "text"
+      DEBUG: "true"         # enables /docs and /redoc in dev
+    networks:
+      tantra-net:
+        ipv4_address: 172.28.0.20
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+
+  # ---------------------------------------------------------------------------
+  # 7. CELERY WORKER — Background task executor
+  # ---------------------------------------------------------------------------
+  celery-worker:
+    <<: *restart
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    container_name: tantra-celery-worker
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src:ro
+    env_file: .env
+    environment:
+      PYTHONPATH: /app/src
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-tantra}:${POSTGRES_PASSWORD:-tantra_secret}@postgres:5432/${POSTGRES_DB:-tantra}
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-tantra_redis_secret}@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-tantra_redis_secret}@redis:6379/2
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-tantra-master-key}
+    command: >
+      celery -A tantra.tasks.celery_app worker
+      --loglevel=${CELERY_LOG_LEVEL:-info}
+      --concurrency=${CELERY_CONCURRENCY:-4}
+      --queues=default,social,agents,scheduled
+    networks:
+      tantra-net:
+        ipv4_address: 172.28.0.21
+
+  # ---------------------------------------------------------------------------
+  # 8. CELERY BEAT — Cron scheduler
+  # ---------------------------------------------------------------------------
+  celery-beat:
+    <<: *restart
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker
+    container_name: tantra-celery-beat
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src:ro
+    environment:
+      PYTHONPATH: /app/src
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-tantra_redis_secret}@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-tantra_redis_secret}@redis:6379/2
+    command: >
+      celery -A tantra.tasks.celery_app beat
+      --loglevel=${CELERY_LOG_LEVEL:-info}
+    networks:
+      tantra-net:
+        ipv4_address: 172.28.0.22
+
+  # ---------------------------------------------------------------------------
+  # 9. OPEN WEBUI — Chat interface (connects to LiteLLM proxy)
+  # ---------------------------------------------------------------------------
+  open-webui:
+    <<: *restart
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: tantra-open-webui
+    depends_on:
+      litellm:
+        condition: service_healthy
+    volumes:
+      - openwebui-data:/app/backend/data
+    ports:
+      - "${WEBUI_PORT:-3000}:8080"
+    environment:
+      OPENAI_API_BASE_URL: http://litellm:4000/v1
+      OPENAI_API_KEY: ${LITELLM_MASTER_KEY:-tantra-master-key}
+      WEBUI_SECRET_KEY: ${SECRET_KEY:-change-me-please-use-a-long-random-string}
+      ENABLE_SIGNUP: ${WEBUI_ENABLE_SIGNUP:-true}
+      DEFAULT_MODELS: director
+      WEBUI_AUTH: "true"
+      # Tantra API as backend for custom tools
+      TANTRA_API_URL: http://tantra-api:8000
+    networks:
+      tantra-net:
+        ipv4_address: 172.28.0.30
+    healthcheck:
+      <<: *hc
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+
+  # ---------------------------------------------------------------------------
+  # 10. N8N — Visual workflow automation
+  # ---------------------------------------------------------------------------
+  n8n:
+    <<: *restart
+    image: n8nio/n8n:latest
+    container_name: tantra-n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - n8n-data:/home/node/.n8n
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    environment:
+      DB_TYPE: postgresdb
+      DB_POSTGRESDB_HOST: postgres
+      DB_POSTGRESDB_PORT: "5432"
+      DB_POSTGRESDB_DATABASE: ${POSTGRES_DB:-tantra}
+      DB_POSTGRESDB_USER: ${POSTGRES_USER:-tantra}
+      DB_POSTGRESDB_PASSWORD: ${POSTGRES_PASSWORD:-tantra_secret}
+      DB_POSTGRESDB_SCHEMA: n8n
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_USER:-admin}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_PASSWORD:-tantra_n8n_admin}
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: http
+      WEBHOOK_URL: http://${N8N_HOST:-localhost}:${N8N_PORT:-5678}/
+      GENERIC_TIMEZONE: ${TIMEZONE:-Asia/Kolkata}
+      N8N_ENCRYPTION_KEY: ${SECRET_KEY:-change-me-please-use-a-long-random-string}
+      # Connect to Tantra API
+      TANTRA_API_URL: http://tantra-api:8000
+    networks:
+      tantra-net:
+        ipv4_address: 172.28.0.31
+
+  # ---------------------------------------------------------------------------
+  # 11. FLOWER — Celery task monitoring UI
+  #     Access: http://localhost:5555
+  # ---------------------------------------------------------------------------
+  flower:
+    <<: *restart
+    image: mher/flower:2.0
+    container_name: tantra-flower
+    depends_on:
+      redis:
+        condition: service_healthy
+    ports:
+      - "${FLOWER_PORT:-5555}:5555"
+    environment:
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-tantra_redis_secret}@redis:6379/1
+      FLOWER_PORT: "5555"
+      FLOWER_BASIC_AUTH: ${FLOWER_USER:-admin}:${FLOWER_PASSWORD:-tantra_flower}
+      FLOWER_PURGE_OFFLINE_WORKERS: "60"
+    networks:
+      tantra-net:
+        ipv4_address: 172.28.0.40
+
+  # ---------------------------------------------------------------------------
+  # 12. TTYD — Web-based terminal (browser shell for all users)
+  #     Access: http://localhost:7681
+  #     Technical users: full shell
+  #     Non-technical: `tantra` CLI pre-loaded in PATH
+  # ---------------------------------------------------------------------------
+  ttyd:
+    <<: *restart
+    image: tsl0922/ttyd:latest   # Debian-based; alpine has arm64 busybox issues
+    container_name: tantra-ttyd
+    ports:
+      - "${TTYD_PORT:-7681}:7681"
+    volumes:
+      - ./src:/app/src:ro
+    environment:
+      PYTHONPATH: /app/src
+    command:
+      - ttyd
+      - --port
+      - "7681"
+      - --credential
+      - "${TTYD_USER:-admin}:${TTYD_PASSWORD:-tantra_shell}"
+      - --writable
+      - bash
+    networks:
+      tantra-net:
+        ipv4_address: 172.28.0.41
+
+# =============================================================================
+# NVIDIA GPU override (Linux only):
+# docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up -d
+# =============================================================================
