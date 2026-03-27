@@ -16,7 +16,8 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RESET='\033[0m'
 
-OLLAMA_HOST="${OLLAMA_HOST:-http://localhost:11434}"
+# Always use localhost when running from host (never inherit OLLAMA_HOST from docker env)
+OLLAMA_HOST="http://localhost:11434"
 
 info()    { echo -e "${CYAN}[tantra]${RESET} $*"; }
 success() { echo -e "${GREEN}[✓]${RESET} $*"; }
@@ -41,14 +42,14 @@ echo -e "${CYAN}   Tantra AI — Pulling Ollama Models                          
 echo -e "${CYAN}=================================================================${RESET}"
 echo ""
 
-# Verify Ollama is running
-if ! curl -sf "${OLLAMA_HOST}/api/tags" > /dev/null 2>&1; then
-    echo "Ollama is not reachable at ${OLLAMA_HOST}"
-    echo "Run 'make up-core' first, then retry."
+# Verify Ollama is running (use docker exec — avoids curl dependency and env var issues)
+if ! docker compose exec ollama ollama list > /dev/null 2>&1; then
+    echo "Ollama container is not running or not ready."
+    echo "Run 'make up-nvidia' (or 'make up') first, then retry."
     exit 1
 fi
 
-info "Ollama is running at ${OLLAMA_HOST}"
+info "Ollama is running"
 echo ""
 
 # ---------------------------------------------------------------------------

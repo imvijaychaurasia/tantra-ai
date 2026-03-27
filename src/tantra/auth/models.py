@@ -34,7 +34,7 @@ class User(SQLAlchemyBaseUserTableUUID, Base):
     is_superuser, is_verified.
     We extend with profile + tenant fields.
     """
-    __tablename__ = "users"
+    __tablename__ = "user"
 
     # Profile
     full_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
