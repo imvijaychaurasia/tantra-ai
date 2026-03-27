@@ -63,29 +63,28 @@ model_list:
     model_info:
       description: "Frontier fallback via OpenAI"
 
-  # Local frontier fallback — mistral-nemo (best available on this Mac setup)
-  # Switch to ollama/llama3.3:70b when on Linux/NVIDIA with 64 GB+ RAM
+  # Local frontier fallback — Llama 3.3 70B (Linux/NVIDIA with RTX 5070 Ti)
   - model_name: frontier
     litellm_params:
-      model: ollama/mistral-nemo:12b
+      model: ollama/llama3.3:70b
       api_base: "http://ollama:11434"
       stream: true
     model_info:
-      description: "Local frontier fallback — Mistral Nemo (Mac small-model mode)"
+      description: "Local frontier fallback — Llama 3.3 70B (Linux/NVIDIA mode)"
 
   # ---------------------------------------------------------------------------
   # DIRECTOR — Department heads, task planning, subordinate coordination
-  # Mac mode: mistral-nemo:12b  |  Linux/NVIDIA: llama3.3:70b
+  # Linux/NVIDIA: llama3.3:70b primary  |  Groq cloud alt  |  phi4 fallback
   # ---------------------------------------------------------------------------
   - model_name: director
     litellm_params:
-      model: ollama/phi4:14b
+      model: ollama/llama3.3:70b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 4096
       temperature: 0.6
     model_info:
-      description: "CMO, CTO, CFO — department-level planning (phi4 Mac mode)"
+      description: "CMO, CTO, CFO — department-level planning (Llama 3.3 70B)"
 
   # Groq fast alternative for director tier (use if GROQ_API_KEY set)
   - model_name: director
@@ -100,18 +99,29 @@ model_list:
   # Director local fallback
   - model_name: director
     litellm_params:
-      model: ollama/mistral-nemo:12b
+      model: ollama/phi4:14b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 4096
       temperature: 0.6
     model_info:
-      description: "Director local fallback — Mistral Nemo"
+      description: "Director local fallback — Phi-4 14B"
 
   # ---------------------------------------------------------------------------
   # MANAGER — Mid-level agents, multi-step execution, sub-task management
-  # Mac mode: phi4:14b  |  Linux: qwen2.5:72b
+  # Linux/NVIDIA: qwen2.5:72b primary  |  phi4 fallback
   # ---------------------------------------------------------------------------
+  - model_name: manager
+    litellm_params:
+      model: ollama/qwen2.5:72b
+      api_base: "http://ollama:11434"
+      stream: true
+      max_tokens: 4096
+      temperature: 0.5
+    model_info:
+      description: "Research leads, content managers (Qwen 2.5 72B)"
+
+  # Manager fallback
   - model_name: manager
     litellm_params:
       model: ollama/phi4:14b
@@ -120,18 +130,7 @@ model_list:
       max_tokens: 4096
       temperature: 0.5
     model_info:
-      description: "Research leads, content managers (phi4 Mac mode)"
-
-  # Manager fallback
-  - model_name: manager
-    litellm_params:
-      model: ollama/mistral-nemo:12b
-      api_base: "http://ollama:11434"
-      stream: true
-      max_tokens: 4096
-      temperature: 0.5
-    model_info:
-      description: "Manager fallback — Mistral Nemo"
+      description: "Manager fallback — Phi-4 14B"
 
   # ---------------------------------------------------------------------------
   # WORKER — Focused single-task execution
@@ -160,8 +159,19 @@ model_list:
 
   # ---------------------------------------------------------------------------
   # CODER — Code generation, debugging, infra scripting
-  # Mac mode: phi4:14b (good at code)  |  Linux: deepseek-coder-v2:16b
+  # Linux/NVIDIA: deepseek-coder-v2:16b primary  |  phi4 fallback
   # ---------------------------------------------------------------------------
+  - model_name: coder
+    litellm_params:
+      model: ollama/deepseek-coder-v2:16b
+      api_base: "http://ollama:11434"
+      stream: true
+      max_tokens: 4096
+      temperature: 0.2
+    model_info:
+      description: "Code agents — DeepSeek Coder V2 16B (Linux/NVIDIA mode)"
+
+  # Coder fallback
   - model_name: coder
     litellm_params:
       model: ollama/phi4:14b
@@ -170,7 +180,7 @@ model_list:
       max_tokens: 4096
       temperature: 0.2
     model_info:
-      description: "Code agents — phi4 is strong on code tasks (Mac mode)"
+      description: "Coder fallback — Phi-4 14B"
 
   # ---------------------------------------------------------------------------
   # FAST — Ultra-low latency for reactive/classification tasks
