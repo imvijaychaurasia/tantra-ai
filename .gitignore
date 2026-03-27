@@ -3,8 +3,8 @@
 # =============================================================================
 
 # Secrets — NEVER commit these
-.env
-.env.*
+#.env
+#.env.*
 !.env.example
 *.key
 *.pem
