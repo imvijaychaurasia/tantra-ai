@@ -11,16 +11,26 @@ Hierarchy:
 """
 from __future__ import annotations
 
-from crewai import Agent, Crew, Process, Task
+from crewai import LLM, Agent, Crew, Process, Task
 from crewai.tools import tool
 
 from tantra.core.config import ModelTier, settings
 from tantra.tools.youtube import youtube_search
 
 
-def _litellm_model(tier: ModelTier) -> str:
-    """Return the LiteLLM proxy model string for a given tier."""
-    return f"openai/{tier.value}"   # LiteLLM routes based on alias
+def _make_llm(tier: ModelTier, base_url: str, api_key: str) -> LLM:
+    """
+    Create a CrewAI LLM object routed through the LiteLLM proxy.
+
+    Using LLM() instead of a bare model string ensures api_base and api_key
+    are forwarded — bare strings like 'openai/director' go directly to
+    api.openai.com and fail with 401 when no OPENAI_API_KEY is set.
+    """
+    return LLM(
+        model=f"openai/{tier.value}",
+        base_url=base_url,
+        api_key=api_key,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -90,10 +100,10 @@ def build_social_media_crew(verbose: bool = True) -> Crew:
             "You understand what resonates with professional audiences on LinkedIn and "
             "content-hungry viewers on YouTube. You think in campaigns, not single posts."
         ),
-        llm=f"openai/{ModelTier.director.value}",
+        llm=_make_llm(ModelTier.director, llm_base, llm_key),
         max_iter=settings.agent_max_iterations,
         verbose=verbose,
-        allow_delegation=True,    # CMO can delegate to workers
+        allow_delegation=True,
     )
 
     # ── Researcher ────────────────────────────────────────────────────────────
@@ -104,7 +114,7 @@ def build_social_media_crew(verbose: bool = True) -> Crew:
             "You are a sharp research analyst who spots trends before they go mainstream. "
             "You use data to back every recommendation and present findings clearly."
         ),
-        llm=f"openai/{ModelTier.manager.value}",
+        llm=_make_llm(ModelTier.manager, llm_base, llm_key),
         tools=[search_youtube_trends],
         max_iter=5,
         verbose=verbose,
@@ -124,7 +134,7 @@ def build_social_media_crew(verbose: bool = True) -> Crew:
             "have a strong hook, and end with a call to action. For YouTube, you write "
             "attention-grabbing scripts with a strong thumbnail concept."
         ),
-        llm=f"openai/{ModelTier.worker.value}",
+        llm=_make_llm(ModelTier.worker, llm_base, llm_key),
         max_iter=5,
         verbose=verbose,
         allow_delegation=False,
@@ -138,7 +148,7 @@ def build_social_media_crew(verbose: bool = True) -> Crew:
             "You are a distribution expert who knows the best times to post on each "
             "platform. You handle all publishing tasks and confirm successful distribution."
         ),
-        llm=f"openai/{ModelTier.worker.value}",
+        llm=_make_llm(ModelTier.worker, llm_base, llm_key),
         tools=[publish_linkedin_post],
         max_iter=3,
         verbose=verbose,
@@ -153,7 +163,7 @@ def build_social_media_crew(verbose: bool = True) -> Crew:
             "You are a data-driven analyst who turns raw metrics into insights. "
             "You identify what's working, what's not, and precisely why."
         ),
-        llm=f"openai/{ModelTier.worker.value}",
+        llm=_make_llm(ModelTier.worker, llm_base, llm_key),
         max_iter=3,
         verbose=verbose,
         allow_delegation=False,
@@ -233,13 +243,7 @@ def build_social_media_crew(verbose: bool = True) -> Crew:
         process=Process.hierarchical,
         manager_agent=cmo,
         verbose=verbose,
-        memory=True,
-        embedder={
-            "provider": "openai",
-            "config": {
-                "model": ModelTier.embedder.value,
-                "api_base": f"{settings.litellm_base_url}/v1",
-                "api_key": settings.litellm_key,
-            },
-        },
+        # memory=True requires an embedder model registered in LiteLLM.
+        # Disabled for now — enable once an embedding model is added to litellm config.
+        memory=False,
     )
