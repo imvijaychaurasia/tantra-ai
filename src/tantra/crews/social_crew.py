@@ -235,15 +235,16 @@ def build_social_media_crew(verbose: bool = True) -> Crew:
     # ---------------------------------------------------------------------------
     # Crew assembly
     # ---------------------------------------------------------------------------
-    # NOTE: in hierarchical process, manager_agent must NOT be in agents list —
-    # CrewAI adds it implicitly. Including it causes a ValidationError.
+    # Sequential process: research → write_linkedin → write_youtube → analyse
+    # tasks_output[1] is reliably the content writer's LinkedIn posts text.
+    #
+    # Hierarchical mode caused the CMO to store its delegation plan in tasks_output
+    # instead of the actual post content written by the content_writer agent.
+    # CMO agent is kept for future Director-level campaign planning crew.
     return Crew(
         agents=[researcher, content_writer, publisher, analyst],
         tasks=[task_research, task_write_linkedin, task_write_youtube, task_analyse],
-        process=Process.hierarchical,
-        manager_agent=cmo,
+        process=Process.sequential,
         verbose=verbose,
-        # memory=True requires an embedder model registered in LiteLLM.
-        # Disabled for now — enable once an embedding model is added to litellm config.
         memory=False,
     )

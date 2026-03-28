@@ -326,22 +326,32 @@ def research_and_draft_posts(self, platform: str = "linkedin") -> dict:
         return {"success": False, "error": str(exc), "items_created": 0}
 
     # ── Step 2: Find the LinkedIn posts in the crew output ───────────────────
-    # The crew runs tasks in order: research → linkedin posts → youtube script → analysis
-    # The linkedin post output is the second task result.
-    # CrewAI stores individual task outputs in result.tasks_output
+    # Sequential crew task order: [0] research, [1] write_linkedin, [2] write_youtube, [3] analyse
+    # tasks_output[1] is the content writer's LinkedIn posts.
     linkedin_post_text_raw = ""
     try:
         if hasattr(result, "tasks_output") and len(result.tasks_output) >= 2:
-            linkedin_post_text_raw = str(result.tasks_output[1])
+            raw1 = result.tasks_output[1]
+            # CrewAI TaskOutput: .raw is the string content, fallback to str()
+            linkedin_post_text_raw = getattr(raw1, "raw", None) or str(raw1)
+            logger.info(f"Using tasks_output[1] ({len(linkedin_post_text_raw)} chars) for post parsing")
         else:
             linkedin_post_text_raw = crew_output
     except Exception:
         linkedin_post_text_raw = crew_output
 
     posts = _parse_linkedin_posts(linkedin_post_text_raw)
+
+    # Last-resort fallback: scan entire crew output for POST N labels
+    if not posts and linkedin_post_text_raw != crew_output:
+        logger.info("Falling back to full crew output for post parsing")
+        posts = _parse_linkedin_posts(crew_output)
+
     if not posts:
-        logger.warning("No posts parsed from crew output")
-        return {"success": False, "error": "No posts parsed from crew output", "items_created": 0}
+        logger.warning("No posts parsed from crew output — storing raw output as single draft")
+        # Store whatever the writer produced so it isn't lost; user can edit before approval
+        hashtags = ",".join(re.findall(r"#\w+", linkedin_post_text_raw))
+        posts = [{"text": linkedin_post_text_raw.strip()[:3000], "hashtags": hashtags}]
 
     # ── Step 3 + 4: Insert each draft + trigger n8n ──────────────────────────
     created_items = []
