@@ -1,0 +1,312 @@
+{
+  "name": "Tantra AI — LinkedIn Content Approval",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "tantra-content-draft",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-webhook-draft",
+      "name": "Receive Draft Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "notes": "Tantra API POSTs here when a new AI draft is ready.\nPayload: { item_id, draft_text, hashtags, platform, approve_url, reject_url, created_at }"
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ received: true, executionId: $execution.id }) }}",
+        "options": {}
+      },
+      "id": "node-webhook-response",
+      "name": "Acknowledge Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [480, 180],
+      "notes": "Immediately respond 200 so tantra-api doesn't time out waiting"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "item_id",
+              "name": "item_id",
+              "value": "={{ $json.body.item_id }}",
+              "type": "string"
+            },
+            {
+              "id": "draft_text",
+              "name": "draft_text",
+              "value": "={{ $json.body.draft_text }}",
+              "type": "string"
+            },
+            {
+              "id": "hashtags",
+              "name": "hashtags",
+              "value": "={{ $json.body.hashtags }}",
+              "type": "string"
+            },
+            {
+              "id": "platform",
+              "name": "platform",
+              "value": "={{ $json.body.platform }}",
+              "type": "string"
+            },
+            {
+              "id": "approve_url",
+              "name": "approve_url",
+              "value": "={{ $json.body.approve_url }}",
+              "type": "string"
+            },
+            {
+              "id": "reject_url",
+              "name": "reject_url",
+              "value": "={{ $json.body.reject_url }}",
+              "type": "string"
+            },
+            {
+              "id": "created_at",
+              "name": "created_at",
+              "value": "={{ $json.body.created_at }}",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-set-vars",
+      "name": "Extract Draft Fields",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [480, 420]
+    },
+    {
+      "parameters": {
+        "content": "=## 📝 LinkedIn Draft — Approval Required\n\n**Platform:** {{ $json.platform }}\n**Draft ID:** `{{ $json.item_id }}`\n**Created:** {{ $json.created_at }}\n\n---\n\n### Draft Post:\n\n{{ $json.draft_text }}\n\n---\n\n**Hashtags:** {{ $json.hashtags }}\n\n---\n\n### Approve or Reject:\n\n**✅ Approve:** [Click to approve]({{ $json.approve_url }})\n\n**❌ Reject:** [Click to reject]({{ $json.reject_url }})\n\n_Or use the HTTP Request nodes below to approve/reject programmatically._",
+        "height": 600,
+        "width": 500,
+        "color": 7
+      },
+      "id": "node-sticky-draft",
+      "name": "Draft Preview",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [760, 200],
+      "notes": "This sticky note renders the draft content in the n8n canvas. Use the manual trigger below to approve or reject."
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "id": "node-wait",
+      "name": "Wait for Human Decision",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [760, 480],
+      "webhookId": "tantra-approval-gate",
+      "notes": "Execution pauses here.\nResume via: POST /webhook/tantra-approval-gate with { decision: 'approve' | 'reject', reason: '...' }"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "condition-approve",
+              "leftValue": "={{ $json.body.decision }}",
+              "rightValue": "approve",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "node-decision-if",
+      "name": "Approve or Reject?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1040, 480]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Extract Draft Fields').item.json.approve_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "approved_by",
+              "value": "n8n-workflow"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-approve-post",
+      "name": "POST Approve to Tantra API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1280, 380],
+      "notes": "Calls tantra-api: POST /api/v1/content/{item_id}/approve"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $('Extract Draft Fields').item.json.reject_url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "reason",
+              "value": "={{ $json.body.reason || 'Rejected via n8n approval workflow' }}"
+            },
+            {
+              "name": "rejected_by",
+              "value": "n8n-workflow"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-reject-post",
+      "name": "POST Reject to Tantra API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1280, 580],
+      "notes": "Calls tantra-api: POST /api/v1/content/{item_id}/reject"
+    },
+    {
+      "parameters": {
+        "content": "=## ✅ Approved\n\n**Item:** {{ $('Extract Draft Fields').item.json.item_id }}\n\nPost approved. It will be published during the next Celery beat run (weekdays 9 AM IST).",
+        "height": 120,
+        "width": 360,
+        "color": 4
+      },
+      "id": "node-sticky-approved",
+      "name": "Approved Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1540, 340]
+    },
+    {
+      "parameters": {
+        "content": "=## ❌ Rejected\n\n**Item:** {{ $('Extract Draft Fields').item.json.item_id }}\n\nPost rejected. A new draft will be generated on the next research cycle.",
+        "height": 120,
+        "width": 360,
+        "color": 3
+      },
+      "id": "node-sticky-rejected",
+      "name": "Rejected Note",
+      "type": "n8n-nodes-base.stickyNote",
+      "typeVersion": 1,
+      "position": [1540, 540]
+    }
+  ],
+  "connections": {
+    "Receive Draft Webhook": {
+      "main": [
+        [
+          {
+            "node": "Acknowledge Webhook",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Extract Draft Fields",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Draft Fields": {
+      "main": [
+        [
+          {
+            "node": "Wait for Human Decision",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Human Decision": {
+      "main": [
+        [
+          {
+            "node": "Approve or Reject?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Approve or Reject?": {
+      "main": [
+        [
+          {
+            "node": "POST Approve to Tantra API",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "POST Reject to Tantra API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "pinData": {},
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": [
+    {
+      "createdAt": "2026-03-27T00:00:00.000Z",
+      "updatedAt": "2026-03-27T00:00:00.000Z",
+      "id": "tantra-phase1",
+      "name": "tantra-phase1"
+    }
+  ],
+  "triggerCount": 1,
+  "updatedAt": "2026-03-27T00:00:00.000Z",
+  "versionId": "1"
+}

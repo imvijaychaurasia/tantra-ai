@@ -7,7 +7,7 @@ Wraps LinkedIn Marketing API v2 for:
   - Scheduling posts (via Celery)
 
 API reference: https://learn.microsoft.com/en-us/linkedin/marketing/
-Scopes needed: r_liteprofile, r_emailaddress, w_member_social
+Scopes needed: openid profile email w_member_social  (OpenID Connect v2 API)
 """
 from __future__ import annotations
 

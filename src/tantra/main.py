@@ -22,6 +22,9 @@ from fastapi.responses import JSONResponse
 from tantra.core.config import settings
 from tantra.core.database import close_db, init_db
 
+# Import all ORM models so Base.metadata.create_all creates every table
+import tantra.db  # noqa: F401  — registers User, OAuthAccount, SocialConnection, ContentQueueItem
+
 # ---------------------------------------------------------------------------
 # Structured logging
 # ---------------------------------------------------------------------------

@@ -89,11 +89,46 @@ class Settings(BaseSettings):
     github_client_id: Optional[str] = None
     github_client_secret: Optional[SecretStr] = None
 
-    # ── LinkedIn (social platform — separate from login OAuth) ────────────────
+    # ── Zernio (Unified Social Media API — primary publishing layer) ─────────
+    # Sign up at https://zernio.com → connect LinkedIn/YouTube/X/etc via OAuth
+    # (no individual developer app registrations needed)
+    # Get your API key from https://zernio.com/dashboard/api-keys
+    zernio_api_key: Optional[SecretStr] = None
+    zernio_base_url: str = "https://zernio.com/api"
+    # After connecting accounts in Zernio dashboard, get IDs from GET /v1/accounts
+    # or run: curl -H "Authorization: Bearer $ZERNIO_API_KEY" https://zernio.com/api/v1/accounts
+    zernio_linkedin_account_id: Optional[str] = None      # acc_xxxxxxxx
+    zernio_youtube_account_id: Optional[str] = None       # acc_xxxxxxxx
+    zernio_twitter_account_id: Optional[str] = None       # acc_xxxxxxxx
+    zernio_instagram_account_id: Optional[str] = None     # acc_xxxxxxxx
+    zernio_default_timezone: str = "Asia/Kolkata"
+
+    @property
+    def zernio_key(self) -> Optional[str]:
+        return self.zernio_api_key.get_secret_value() if self.zernio_api_key else None
+
+    @property
+    def zernio_enabled(self) -> bool:
+        return bool(self.zernio_api_key)
+
+    # ── LinkedIn (direct API — fallback if Zernio not configured) ────────────
     linkedin_client_id: Optional[str] = None
     linkedin_client_secret: Optional[SecretStr] = None
     linkedin_redirect_uri: str = "http://localhost:8000/api/v1/auth/linkedin/callback"
-    linkedin_scopes: str = "r_liteprofile,r_emailaddress,w_member_social"
+    # LinkedIn OpenID Connect scopes (v2 API — replaces legacy r_liteprofile/r_emailaddress)
+    #   openid  — enables /userinfo endpoint (sub, name, email, picture)
+    #   profile — full name, profile picture
+    #   email   — primary email address
+    #   w_member_social — create/delete UGC posts
+    linkedin_scopes: str = "openid profile email w_member_social"
+
+    # ── n8n Workflow Automation ───────────────────────────────────────────────
+    # n8n runs at localhost:5678 in the Docker stack
+    # Content draft webhook — tantra-api POSTs here when a new draft is ready for review
+    n8n_content_draft_webhook: str = "http://n8n:5678/webhook/tantra-content-draft"
+    # Approval callback — n8n POSTs back here with approve/reject decision
+    # This is the URL tantra-api exposes for n8n to call after human review
+    n8n_approval_callback_base: str = "http://tantra-api:8000/api/v1/content"
 
     # ── YouTube / Google Data API ─────────────────────────────────────────────
     youtube_api_key: Optional[SecretStr] = None

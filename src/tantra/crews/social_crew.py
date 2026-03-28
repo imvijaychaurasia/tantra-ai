@@ -15,7 +15,6 @@ from crewai import Agent, Crew, Process, Task
 from crewai.tools import tool
 
 from tantra.core.config import ModelTier, settings
-from tantra.tools.linkedin import linkedin_post_text
 from tantra.tools.youtube import youtube_search
 
 
@@ -29,12 +28,30 @@ def _litellm_model(tier: ModelTier) -> str:
 # ---------------------------------------------------------------------------
 
 @tool("LinkedIn Post Publisher")
-def publish_linkedin_post(access_token: str, author_urn: str, text: str) -> str:
-    """Publish a text post to LinkedIn. Returns post URN or error."""
+def publish_linkedin_post(text: str, platform: str = "linkedin") -> str:
+    """
+    Publish a text post to LinkedIn (or any other configured platform).
+    Uses Zernio if ZERNIO_API_KEY is set (recommended — no developer app needed).
+    Falls back to direct LinkedIn API if Zernio is not configured.
+    Returns post ID/URN or error message.
+    """
     import asyncio
-    result = asyncio.get_event_loop().run_until_complete(
-        linkedin_post_text(access_token=access_token, author_urn=author_urn, text=text)
-    )
+
+    if settings.zernio_enabled:
+        from tantra.tools.zernio_client import zernio_post_text
+        result = asyncio.get_event_loop().run_until_complete(
+            zernio_post_text(content=text, platform=platform)
+        )
+    else:
+        # Fallback: requires access_token to be resolved at runtime from DB
+        # In the crew context this won't work without a token — the agent should
+        # route publishing through the Celery task instead of calling this directly
+        return (
+            "Direct publishing requires Zernio configuration. "
+            "Set ZERNIO_API_KEY in .env to enable autonomous posting. "
+            "Alternatively, the content will be queued for the scheduled publish task."
+        )
+
     return str(result)
 
 

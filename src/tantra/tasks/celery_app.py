@@ -52,12 +52,25 @@ app.config_from_object({
 # Celery Beat schedule (cron tasks)
 # ---------------------------------------------------------------------------
 app.conf.beat_schedule = {
-    # Post to LinkedIn every weekday at 9 AM
-    "linkedin-daily-post": {
-        "task": "tantra.tasks.social.linkedin_scheduled_post",
-        "schedule": crontab(hour=9, minute=0, day_of_week="1-5"),
-        "options": {"queue": "scheduled"},
+    # ── Phase 1: LinkedIn content pipeline ───────────────────────────────────
+
+    # Step 1: Research + draft 3 LinkedIn posts → insert to content_queue → n8n approval
+    # Runs Mon/Wed/Fri at 7 AM so drafts are ready for the 9 AM publishing window
+    "content-research-and-draft": {
+        "task": "tantra.tasks.social.research_and_draft_posts",
+        "schedule": crontab(hour=7, minute=0, day_of_week="1,3,5"),
+        "options": {"queue": "agents"},
     },
+
+    # Step 2: Publish approved posts from content_queue to LinkedIn
+    # Runs Mon-Fri at 9 AM — after n8n approval has had 2 hours to collect decisions
+    "linkedin-publish-approved": {
+        "task": "tantra.tasks.social.publish_approved_linkedin_posts",
+        "schedule": crontab(hour=9, minute=0, day_of_week="1-5"),
+        "options": {"queue": "social"},
+    },
+
+    # ── Supporting tasks ──────────────────────────────────────────────────────
 
     # YouTube analytics pull — daily at 8 AM
     "youtube-analytics-pull": {
@@ -72,41 +85,21 @@ app.conf.beat_schedule = {
         "schedule": crontab(hour=2, minute=0),
         "options": {"queue": "scheduled"},
     },
-
-    # Content idea generation — Mon/Wed/Fri at 7 AM
-    "content-ideation": {
-        "task": "tantra.tasks.agent.generate_content_ideas",
-        "schedule": crontab(hour=7, minute=0, day_of_week="1,3,5"),
-        "options": {"queue": "agents"},
-    },
 }
+
+
+# ---------------------------------------------------------------------------
+# Auto-discover tasks from social_tasks module (Phase 1 LinkedIn pipeline)
+# ---------------------------------------------------------------------------
+# social_tasks.py registers:
+#   tantra.tasks.social.research_and_draft_posts
+#   tantra.tasks.social.publish_approved_linkedin_posts
+app.autodiscover_tasks(["tantra.tasks.social_tasks"], force=True)
 
 
 # ---------------------------------------------------------------------------
 # Tasks
 # ---------------------------------------------------------------------------
-
-@app.task(bind=True, name="tantra.tasks.social.linkedin_scheduled_post", queue="social")
-def linkedin_scheduled_post(self: Celery, post_text: str = "", author_urn: str = "") -> dict:
-    """
-    Scheduled LinkedIn post task.
-    In full implementation: pull post from content queue,
-    retrieve stored access token, publish via LinkedIn API.
-    """
-    import asyncio
-    from tantra.tools.linkedin import linkedin_post_text
-
-    if not post_text:
-        return {"skipped": True, "reason": "No post text provided"}
-
-    # Retrieve stored token (placeholder — implement token store)
-    access_token = ""  # TODO: fetch from encrypted token store
-
-    result = asyncio.get_event_loop().run_until_complete(
-        linkedin_post_text(access_token, author_urn, post_text)
-    )
-    return result
-
 
 @app.task(bind=True, name="tantra.tasks.social.youtube_analytics_pull", queue="social")
 def youtube_analytics_pull(self: Celery) -> dict:
@@ -165,26 +158,9 @@ def consolidate_memories(self: Celery) -> dict:
 @app.task(bind=True, name="tantra.tasks.agent.generate_content_ideas", queue="agents")
 def generate_content_ideas(self: Celery) -> dict:
     """
-    Generate content ideas for LinkedIn and YouTube using the CMO leader agent.
-    Results stored in DB content queue.
+    Legacy content idea stub — superseded by research_and_draft_posts (social_tasks.py).
+    Kept for backward compatibility; beat schedule now points to the new task.
+    Delegates directly to the new task.
     """
-    import asyncio
-    from tantra.agents.leader import LeaderAgent
-    from tantra.core.config import ModelTier
-
-    cmo = LeaderAgent(
-        name="CMO",
-        role="Chief Marketing Officer",
-        goal="Generate viral content ideas for LinkedIn and YouTube",
-        model_tier=ModelTier.director,
-        worker_roles=["research", "create"],
-    )
-
-    result = asyncio.get_event_loop().run_until_complete(
-        cmo.execute(
-            "Generate 5 LinkedIn post ideas and 2 YouTube video concepts "
-            "based on current AI trends. Focus on practical, actionable insights."
-        )
-    )
-
-    return {"success": result.success, "ideas": result.output}
+    from tantra.tasks.social_tasks import research_and_draft_posts
+    return research_and_draft_posts.delay().get(timeout=600)

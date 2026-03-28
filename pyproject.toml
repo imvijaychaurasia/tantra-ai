@@ -55,10 +55,14 @@ dependencies = [
     "django-celery-beat>=2.6.0", # DB-backed beat scheduler
 
     # ── Social Media APIs ─────────────────────────────────────────────────────
+    # Zernio: unified social API — post to LinkedIn, X, Instagram, TikTok, YouTube
+    # and 10+ platforms via a single API key. No per-platform developer apps needed.
+    # Connect accounts once at https://zernio.com/dashboard → get ZERNIO_API_KEY
+    "zernio-sdk>=0.1.0",
     "google-api-python-client>=2.131.0",   # YouTube Data API v3
     "google-auth-httplib2>=0.2.0",
     "google-auth-oauthlib>=1.2.0",
-    "requests-oauthlib>=1.4.0",            # LinkedIn OAuth
+    "requests-oauthlib>=1.4.0",            # LinkedIn direct OAuth (fallback)
 
     # ── Auth (fastapi-users: email/pw + OAuth + JWT refresh) ─────────────────
     "fastapi-users[sqlalchemy]>=13.0.0",
