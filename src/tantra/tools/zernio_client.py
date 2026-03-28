@@ -36,6 +36,24 @@ from tantra.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _obj_to_dict(obj: Any) -> dict[str, Any]:
+    """
+    Normalise a Zernio SDK response object (or plain dict) to a plain dict.
+
+    The SDK may return Pydantic v1 models (.dict()), Pydantic v2 models
+    (.model_dump()), dataclasses (vars()), or plain dicts — handle all cases.
+    """
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "model_dump"):          # Pydantic v2
+        return obj.model_dump()
+    if hasattr(obj, "dict"):                # Pydantic v1
+        return obj.dict()
+    if hasattr(obj, "__dict__"):            # dataclass / generic object
+        return {k: v for k, v in vars(obj).items() if not k.startswith("_")}
+    return {}
+
 # Zernio platform → Tantra platform name mapping
 PLATFORM_ACCOUNT_MAP: dict[str, str] = {
     "linkedin":  "zernio_linkedin_account_id",
@@ -85,21 +103,24 @@ class ZernioClient:
     async def get_accounts(self) -> list[dict[str, Any]]:
         """
         List all social accounts connected in Zernio.
-        Returns list of {_id, platform, displayName, username, profileUrl}.
+        Returns list of {id, platform, display_name, username, profile_url}.
         Call this once after connecting accounts in the dashboard to get your account IDs.
         """
         result = await self._client.accounts.alist()
-        accounts = getattr(result, "accounts", result) or []
-        return [
-            {
-                "id": acc.get("_id", ""),
-                "platform": acc.get("platform", ""),
-                "display_name": acc.get("displayName", acc.get("display_name", "")),
-                "username": acc.get("username", ""),
-                "profile_url": acc.get("profileUrl", ""),
-            }
-            for acc in (accounts if isinstance(accounts, list) else [accounts])
-        ]
+        # SDK may return a wrapper object or a plain list
+        raw = getattr(result, "accounts", result) or []
+        accounts = raw if isinstance(raw, list) else [raw]
+        out = []
+        for acc in accounts:
+            a = _obj_to_dict(acc)
+            out.append({
+                "id":           a.get("_id", a.get("id", "")),
+                "platform":     a.get("platform", ""),
+                "display_name": a.get("displayName", a.get("display_name", a.get("name", ""))),
+                "username":     a.get("username", ""),
+                "profile_url":  a.get("profileUrl", a.get("profile_url", "")),
+            })
+        return out
 
     async def get_profiles(self) -> list[dict[str, Any]]:
         """
@@ -107,16 +128,18 @@ class ZernioClient:
         A profile groups multiple platform accounts (e.g. 'Personal Brand' = LinkedIn + Twitter).
         """
         result = await self._client.profiles.alist()
-        profiles = getattr(result, "profiles", result) or []
-        return [
-            {
-                "id": p.get("_id", ""),
-                "name": p.get("name", ""),
-                "description": p.get("description", ""),
-                "accounts": p.get("accounts", []),
-            }
-            for p in (profiles if isinstance(profiles, list) else [profiles])
-        ]
+        raw = getattr(result, "profiles", result) or []
+        profiles = raw if isinstance(raw, list) else [raw]
+        out = []
+        for p in profiles:
+            d = _obj_to_dict(p)
+            out.append({
+                "id":          d.get("_id", d.get("id", "")),
+                "name":        d.get("name", ""),
+                "description": d.get("description", ""),
+                "accounts":    d.get("accounts", []),
+            })
+        return out
 
     # ------------------------------------------------------------------
     # Publishing — all post types
@@ -275,8 +298,8 @@ class ZernioClient:
         """Retrieve a post's current status and details."""
         try:
             result = await self._client.posts.aget(post_id)
-            post = getattr(result, "post", result)
-            return {"success": True, "post": post}
+            raw = getattr(result, "post", result)
+            return {"success": True, "post": _obj_to_dict(raw) if raw is not None else {}}
         except Exception as exc:
             return {"success": False, "error": str(exc)}
 
@@ -368,9 +391,10 @@ class ZernioClient:
 
         try:
             result = await self._client.posts.acreate(**kwargs)
-            post = getattr(result, "post", result)
-            post_id = post.get("_id", "") if isinstance(post, dict) else ""
-            platform_results = post.get("platforms", []) if isinstance(post, dict) else []
+            raw = getattr(result, "post", result)
+            post = _obj_to_dict(raw) if raw is not None else {}
+            post_id = post.get("_id", post.get("id", ""))
+            platform_results = post.get("platforms", [])
 
             logger.info("Zernio post created: %s → platforms=%s", post_id, platform_list)
             return {
