@@ -408,15 +408,19 @@ async def list_zernio_accounts() -> JSONResponse:
         raise HTTPException(status_code=502, detail=f"Zernio API error: {exc}")
 
 
+class ZernioPostRequest(BaseModel):
+    text: str
+    platform: str = "linkedin"
+    account_id: Optional[str] = None
+
+
 @router.post("/social/zernio/post", tags=["social"])
-async def post_via_zernio(
-    text: str,
-    platform: str = "linkedin",
-    account_id: Optional[str] = None,
-) -> JSONResponse:
+async def post_via_zernio(body: ZernioPostRequest) -> JSONResponse:
     """
     Quick-test endpoint: publish a text post via Zernio immediately.
     For production use, create a task and let the scheduled pipeline publish it.
+
+    Body: {"text": "...", "platform": "linkedin", "account_id": "acc_..."}
     """
     if not settings.zernio_enabled:
         raise HTTPException(
@@ -425,7 +429,7 @@ async def post_via_zernio(
         )
     from tantra.tools.zernio_client import ZernioClient
     client = ZernioClient()
-    result = await client.post_text(text, platform=platform, account_id=account_id)
+    result = await client.post_text(body.text, platform=body.platform, account_id=body.account_id)
     if not result.get("success"):
         raise HTTPException(status_code=502, detail=result.get("error", "Zernio error"))
     return JSONResponse(result)
