@@ -113,12 +113,23 @@ class ZernioClient:
         out = []
         for acc in accounts:
             a = _obj_to_dict(acc)
+            # Try every plausible ID field name the SDK might use
+            acc_id = (
+                a.get("_id")
+                or a.get("id")
+                or a.get("accountId")
+                or a.get("account_id")
+                or a.get("socialAccountId")
+                or a.get("social_account_id")
+                or ""
+            )
             out.append({
-                "id":           a.get("_id", a.get("id", "")),
+                "id":           acc_id,
                 "platform":     a.get("platform", ""),
                 "display_name": a.get("displayName", a.get("display_name", a.get("name", ""))),
                 "username":     a.get("username", ""),
                 "profile_url":  a.get("profileUrl", a.get("profile_url", "")),
+                "_raw_keys":    list(a.keys()),   # DEBUG: remove once ID field confirmed
             })
         return out
 
