@@ -113,15 +113,24 @@ class ZernioClient:
         out = []
         for acc in accounts:
             a = _obj_to_dict(acc)
+            # profile_id may be a nested Profile object — extract the string ID
+            raw_pid = a.get("profileId", "")
+            if isinstance(raw_pid, dict):
+                profile_id = raw_pid.get("field_id", raw_pid.get("_id", raw_pid.get("id", "")))
+            elif hasattr(raw_pid, "field_id"):
+                profile_id = raw_pid.field_id
+            else:
+                profile_id = str(raw_pid) if raw_pid else ""
+
             out.append({
-                "id":               a.get("field_id", ""),        # confirmed Zernio SDK field name
-                "profile_id":       a.get("profileId", ""),
+                "id":               a.get("field_id", ""),
+                "profile_id":       profile_id,
                 "platform":         a.get("platform", ""),
                 "display_name":     a.get("displayName", a.get("display_name", a.get("name", ""))),
                 "username":         a.get("username", ""),
                 "profile_url":      a.get("profileUrl", a.get("profile_url", "")),
                 "is_active":        a.get("isActive", True),
-                "followers_count":  a.get("followersCount", 0),
+                "followers_count":  a.get("followersCount") or 0,
             })
         return out
 
