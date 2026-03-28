@@ -22,9 +22,11 @@ litellm_settings:
   set_verbose: false
   json_logs: true
   request_timeout: 600                    # 10 min for long agent chains
-  num_retries: 3
+  num_retries: 2
   fallbacks:
     - frontier: ["director", "manager"]   # If cloud fails → local fallback
+    - director: ["worker", "fast"]        # If 70B OOM → fall back to phi4:14b
+    - manager: ["worker", "fast"]         # If 72B OOM → fall back to phi4:14b
   drop_params: true                       # Ignore unsupported params silently
 
 router_settings:
@@ -74,17 +76,9 @@ model_list:
 
   # ---------------------------------------------------------------------------
   # DIRECTOR — Department heads, task planning, subordinate coordination
-  # Linux/NVIDIA: llama3.3:70b primary  |  Groq cloud alt  |  phi4 fallback
+  # Order: phi4:14b first (always fits in RAM), Groq cloud if key set,
+  #        llama3.3:70b last (needs 27.6 GiB — only runs when RAM is free)
   # ---------------------------------------------------------------------------
-  - model_name: director
-    litellm_params:
-      model: ollama/llama3.3:70b
-      api_base: "http://ollama:11434"
-      stream: true
-      max_tokens: 4096
-      temperature: 0.6
-    model_info:
-      description: "CMO, CTO, CFO — department-level planning (Llama 3.3 70B)"
 
   # Groq fast alternative for director tier (use if GROQ_API_KEY set)
   - model_name: director
@@ -96,7 +90,7 @@ model_list:
     model_info:
       description: "Director via Groq cloud — llama3.3:70b fast inference"
 
-  # Director local fallback
+  # Director primary local — Phi-4 14B (reliable, always fits in RAM)
   - model_name: director
     litellm_params:
       model: ollama/phi4:14b
@@ -105,23 +99,25 @@ model_list:
       max_tokens: 4096
       temperature: 0.6
     model_info:
-      description: "Director local fallback — Phi-4 14B"
+      description: "Director primary local — Phi-4 14B (fits in available RAM)"
 
-  # ---------------------------------------------------------------------------
-  # MANAGER — Mid-level agents, multi-step execution, sub-task management
-  # Linux/NVIDIA: qwen2.5:72b primary  |  phi4 fallback
-  # ---------------------------------------------------------------------------
-  - model_name: manager
+  # Director heavy local — Llama 3.3 70B (needs 27.6 GiB, use when RAM free)
+  - model_name: director
     litellm_params:
-      model: ollama/qwen2.5:72b
+      model: ollama/llama3.3:70b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 4096
-      temperature: 0.5
+      temperature: 0.6
     model_info:
-      description: "Research leads, content managers (Qwen 2.5 72B)"
+      description: "Director heavy local — Llama 3.3 70B (Linux/NVIDIA when RAM free)"
 
-  # Manager fallback
+  # ---------------------------------------------------------------------------
+  # MANAGER — Mid-level agents, multi-step execution, sub-task management
+  # Order: phi4:14b first (always fits in RAM), qwen2.5:72b when RAM free
+  # ---------------------------------------------------------------------------
+
+  # Manager primary local — Phi-4 14B (reliable, always fits in RAM)
   - model_name: manager
     litellm_params:
       model: ollama/phi4:14b
@@ -130,7 +126,18 @@ model_list:
       max_tokens: 4096
       temperature: 0.5
     model_info:
-      description: "Manager fallback — Phi-4 14B"
+      description: "Manager primary local — Phi-4 14B (fits in available RAM)"
+
+  # Manager heavy local — Qwen 2.5 72B (needs ~40 GiB, use when RAM free)
+  - model_name: manager
+    litellm_params:
+      model: ollama/qwen2.5:72b
+      api_base: "http://ollama:11434"
+      stream: true
+      max_tokens: 4096
+      temperature: 0.5
+    model_info:
+      description: "Manager heavy local — Qwen 2.5 72B (Linux/NVIDIA when RAM free)"
 
   # ---------------------------------------------------------------------------
   # WORKER — Focused single-task execution
