@@ -225,8 +225,10 @@ def build_social_media_crew(verbose: bool = True) -> Crew:
     # ---------------------------------------------------------------------------
     # Crew assembly
     # ---------------------------------------------------------------------------
+    # NOTE: in hierarchical process, manager_agent must NOT be in agents list —
+    # CrewAI adds it implicitly. Including it causes a ValidationError.
     return Crew(
-        agents=[cmo, researcher, content_writer, publisher, analyst],
+        agents=[researcher, content_writer, publisher, analyst],
         tasks=[task_research, task_write_linkedin, task_write_youtube, task_analyse],
         process=Process.hierarchical,
         manager_agent=cmo,
