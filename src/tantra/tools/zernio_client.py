@@ -113,23 +113,15 @@ class ZernioClient:
         out = []
         for acc in accounts:
             a = _obj_to_dict(acc)
-            # Try every plausible ID field name the SDK might use
-            acc_id = (
-                a.get("_id")
-                or a.get("id")
-                or a.get("accountId")
-                or a.get("account_id")
-                or a.get("socialAccountId")
-                or a.get("social_account_id")
-                or ""
-            )
             out.append({
-                "id":           acc_id,
-                "platform":     a.get("platform", ""),
-                "display_name": a.get("displayName", a.get("display_name", a.get("name", ""))),
-                "username":     a.get("username", ""),
-                "profile_url":  a.get("profileUrl", a.get("profile_url", "")),
-                "_raw_keys":    list(a.keys()),   # DEBUG: remove once ID field confirmed
+                "id":               a.get("field_id", ""),        # confirmed Zernio SDK field name
+                "profile_id":       a.get("profileId", ""),
+                "platform":         a.get("platform", ""),
+                "display_name":     a.get("displayName", a.get("display_name", a.get("name", ""))),
+                "username":         a.get("username", ""),
+                "profile_url":      a.get("profileUrl", a.get("profile_url", "")),
+                "is_active":        a.get("isActive", True),
+                "followers_count":  a.get("followersCount", 0),
             })
         return out
 
@@ -145,7 +137,7 @@ class ZernioClient:
         for p in profiles:
             d = _obj_to_dict(p)
             out.append({
-                "id":          d.get("_id", d.get("id", "")),
+                "id":          d.get("field_id", d.get("_id", d.get("id", ""))),
                 "name":        d.get("name", ""),
                 "description": d.get("description", ""),
                 "accounts":    d.get("accounts", []),
