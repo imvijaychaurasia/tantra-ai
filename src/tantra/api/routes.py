@@ -32,6 +32,7 @@ from typing import Any, Optional
 
 import httpx
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select, update
@@ -393,7 +394,7 @@ async def list_zernio_accounts() -> JSONResponse:
         client = ZernioClient()
         accounts = await client.get_accounts()
         profiles = await client.get_profiles()
-        return JSONResponse(
+        return JSONResponse(jsonable_encoder(
             {
                 "configured": True,
                 "accounts": accounts,
@@ -403,7 +404,7 @@ async def list_zernio_accounts() -> JSONResponse:
                     "ZERNIO_LINKEDIN_ACCOUNT_ID, ZERNIO_YOUTUBE_ACCOUNT_ID, etc."
                 ),
             }
-        )
+        ))
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Zernio API error: {exc}")
 
@@ -432,7 +433,7 @@ async def post_via_zernio(body: ZernioPostRequest) -> JSONResponse:
     result = await client.post_text(body.text, platform=body.platform, account_id=body.account_id)
     if not result.get("success"):
         raise HTTPException(status_code=502, detail=result.get("error", "Zernio error"))
-    return JSONResponse(result)
+    return JSONResponse(jsonable_encoder(result))
 
 
 # ---------------------------------------------------------------------------
