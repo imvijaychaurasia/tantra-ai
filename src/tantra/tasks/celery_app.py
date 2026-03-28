@@ -29,11 +29,18 @@ app.config_from_object({
     "accept_content": ["json"],
     "result_expires": 3600,       # 1 hour result TTL
 
+    # Explicitly include all task modules so workers register them on startup.
+    # autodiscover_tasks() only works for packages (directories with tasks.py),
+    # not for single-file modules like social_tasks.py — use include= instead.
+    "include": [
+        "tantra.tasks.social_tasks",   # Phase 1: LinkedIn pipeline tasks
+    ],
+
     # Queues
     "task_default_queue": "default",
     "task_routes": {
         "tantra.tasks.social.*": {"queue": "social"},
-        "tantra.tasks.agent.*": {"queue": "agents"},
+        "tantra.tasks.agent.*":  {"queue": "agents"},
         "tantra.tasks.scheduled.*": {"queue": "scheduled"},
     },
 
@@ -86,15 +93,6 @@ app.conf.beat_schedule = {
         "options": {"queue": "scheduled"},
     },
 }
-
-
-# ---------------------------------------------------------------------------
-# Auto-discover tasks from social_tasks module (Phase 1 LinkedIn pipeline)
-# ---------------------------------------------------------------------------
-# social_tasks.py registers:
-#   tantra.tasks.social.research_and_draft_posts
-#   tantra.tasks.social.publish_approved_linkedin_posts
-app.autodiscover_tasks(["tantra.tasks.social_tasks"], force=True)
 
 
 # ---------------------------------------------------------------------------
