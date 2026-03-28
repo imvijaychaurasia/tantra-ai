@@ -49,8 +49,8 @@ class Settings(BaseSettings):
                                 "http://localhost:5678", "http://localhost:4000"]
 
     # ── Database ─────────────────────────────────────────────────────────────
-    database_url: str = "postgresql+asyncpg://tantra:tantra_secret@localhost:5432/tantra"
-    database_sync_url: str = "postgresql://tantra:tantra_secret@localhost:5432/tantra"
+    database_url: str = "postgresql+asyncpg://tantra:tantra_secret@postgres:5432/tantra"
+    database_sync_url: str = "postgresql://tantra:tantra_secret@postgres:5432/tantra"
     db_pool_size: int = 10
     db_max_overflow: int = 20
 
