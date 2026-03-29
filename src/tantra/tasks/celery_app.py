@@ -80,19 +80,18 @@ app.conf.beat_schedule = {
     # ── Phase 1: Engagement + Progress tasks ─────────────────────────────────
 
     # Task 3: Find AI posts in LinkedIn feed → comment in human tone
-    # Every 5 min for testing. Change to crontab(minute="*/30") for production.
+    # Every 4 hours in production
     "linkedin-engage-feed": {
         "task": "tantra.tasks.social.linkedin_engage_feed",
-        "schedule": crontab(minute="*/5"),
+        "schedule": crontab(hour="*/4", minute=0),
         "options": {"queue": "social"},
     },
 
     # Task 4: Write + publish a human-tone post about the Tantra AI build
-    # Every 5 min for testing (1-hour Redis cooldown prevents spam).
-    # Change schedule to crontab(hour=10, minute=0) for daily prod posting.
+    # Weekdays at 9:30 AM IST (Redis cooldown still guards against accidental double-runs)
     "tantra-progress-post": {
         "task": "tantra.tasks.social.post_tantra_progress",
-        "schedule": crontab(minute="*/5"),
+        "schedule": crontab(hour=9, minute=30, day_of_week="1-5"),
         "options": {"queue": "social"},
     },
 

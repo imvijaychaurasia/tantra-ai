@@ -762,34 +762,81 @@ def linkedin_engage_feed(self) -> dict:
 # Task 4 — Post about Tantra AI progress in human, jargon-free tone
 # ---------------------------------------------------------------------------
 
-# Context the LLM uses to write about the build journey
-_TANTRA_BUILD_CONTEXT = """
-You are Vijay Chaurasia, an engineering manager building a personal AI project called Tantra AI on the side.
-Here is the current status:
-- Phase 1 is done: you built a pipeline that automatically researches topics, writes LinkedIn posts, and publishes them
-- The stack runs locally on your own machine using open-source AI models
-- Phase 2 is starting: building a team of AI agents that work together, each with a specific role (like a company structure)
-- Recent struggles: AI models kept running out of memory, had to figure out which smaller model to use as a fallback.
-  Docker networking tripped you up — inside containers, "localhost" doesn't point where you think it does.
-- What surprised you: once the pieces clicked together, watching the system write and post real content on its own felt genuinely surreal.
-- You post about this to share the journey, not to be an influencer.
-"""
+# All distinct story angles for the Tantra AI build journey.
+# The prompt picks ONE angle per post using a rotating Redis counter —
+# prevents the same memory/Docker story from repeating across consecutive posts.
+_TANTRA_STORY_ANGLES = [
+    # angle-0
+    "Docker networking: inside containers, 'localhost' doesn't point where you think. "
+    "Spent hours before realising the service name IS the hostname. Simple once you know, brutal until you do.",
+
+    # angle-1
+    "AI models running out of memory mid-task. Had to set up a fallback chain — "
+    "try the big model first, fall back to a smaller one automatically. "
+    "Now the pipeline keeps running even when the large model can't load.",
+
+    # angle-2
+    "Phase 1 done: the system now researches a topic, writes a LinkedIn post, "
+    "and publishes it — entirely on its own, on a schedule. "
+    "First time it ran end-to-end without me touching anything felt genuinely strange.",
+
+    # angle-3
+    "Phase 2 is starting: instead of one AI doing everything, building a small team of agents — "
+    "each with a specific role. One researches, one writes, one reviews. "
+    "Like a company org chart, but made of software.",
+
+    # angle-4
+    "The approval step: every AI-generated post goes through an n8n workflow before publishing. "
+    "I see the draft, click approve or reject. "
+    "Keeps the output quality high without me having to write anything myself.",
+
+    # angle-5
+    "Running all the AI models locally on my own machine — no API costs, no cloud dependency. "
+    "The tradeoff is RAM. My machine has 56 GB and some models still push the limits.",
+
+    # angle-6
+    "Built this to solve a real problem: staying visible on LinkedIn takes time I don't have. "
+    "The goal was to automate the research and writing, keep the human review, "
+    "and still sound like me.",
+
+    # angle-7
+    "LiteLLM sits in front of all the local models as a single API endpoint. "
+    "Means I can swap models without touching application code. "
+    "One config change routes traffic to a different model.",
+
+    # angle-8
+    "The pipeline writes posts I would actually write — short, specific, no buzzwords. "
+    "Getting there required a lot of prompt iteration. "
+    "The first drafts were very corporate. Very 'I'm excited to share'.",
+
+    # angle-9
+    "Celery handles all the scheduled tasks — research at 7 AM, publish at 9 AM. "
+    "Redis tracks what's been done so nothing runs twice. "
+    "The whole thing runs quietly in the background while I'm at my day job.",
+]
 
 _HUMAN_POST_STYLE = """
-Write a short LinkedIn post (under 150 words) about the Tantra AI project.
+Write a short LinkedIn post (under 120 words) about one moment from the Tantra AI build journey.
 
 Rules:
+- NEVER start with "Hey", "Hey folks", "Hey there", "Hi", "Hello", or any greeting.
+  Start directly with the story, observation, or fact.
 - First person, conversational. Like you're talking to a colleague over coffee.
-- Pick ONE specific thing from the context — one moment, one failure, one win. Not a summary.
-- Short sentences. Vary their length.
-- No emojis, no bullet points, no headers.
+- Write about ONLY the angle given in the prompt. Do not mix in other angles.
+- Short sentences. Vary their length. No bullet points, no headers.
+- No emojis.
 - No jargon: never use "leverage", "ecosystem", "synergy", "utilize", "paradigm",
-  "deep dive", "thought leadership", "exciting journey", "moving the needle".
-- No corporate phrases: "I'm thrilled to share", "proud to announce"
-- Be honest. If something was hard or broke, say that.
+  "deep dive", "thought leadership", "exciting journey", "moving the needle",
+  "digital agents", "well-oiled machine", "game changer".
+- No corporate openers: "I'm thrilled to share", "proud to announce", "excited to".
+- Be honest. If something was annoying or broke, say that plainly.
 - End with a plain observation, not a question or CTA.
-- Maximum 2 hashtags at the very end, or none.
+- Finish with exactly these hashtags on their own line (no others):
+  #LocalAI #BuildingTantraAI #BuildingLocalAIStack #ForBusiness #ForInfluencers #ForPersonalAssistant #LocalAIWorkForce
 """
+
+# Redis key for rotating story angles
+_STORY_ANGLE_KEY = "tantra:progress_post:last_angle"
 
 
 @app.task(bind=True, name="tantra.tasks.social.post_tantra_progress", queue="social")
@@ -808,21 +855,33 @@ def post_tantra_progress(self) -> dict:
     if not _cfg.zernio_enabled:
         return {"success": False, "error": "Zernio not configured"}
 
-    # Rate limit: don't post more than once per hour (even if schedule is tighter)
+    # Rate limit: don't post more than once per day (production cadence guard)
     try:
         r = _get_redis_client()
         if r.exists("tantra:progress_post:cooldown"):
             logger.info("Progress post cooldown active — skipping this run")
-            return {"success": True, "skipped": True, "reason": "cooldown active (1h)"}
+            return {"success": True, "skipped": True, "reason": "cooldown active (24h)"}
     except Exception:
         pass  # If Redis is down, proceed anyway
+
+    # Pick the next story angle — rotate through all 10 in order so no story repeats
+    try:
+        r = _get_redis_client()
+        last_angle = int(r.get(_STORY_ANGLE_KEY) or -1)
+        next_angle = (last_angle + 1) % len(_TANTRA_STORY_ANGLES)
+        angle_text = _TANTRA_STORY_ANGLES[next_angle]
+        logger.info("Using story angle %d/%d", next_angle, len(_TANTRA_STORY_ANGLES) - 1)
+    except Exception:
+        next_angle = 0
+        angle_text = _TANTRA_STORY_ANGLES[0]
 
     # Generate the post using LiteLLM worker tier (phi4:14b)
     try:
         post_text = _llm_generate(
             prompt=(
-                "Write a LinkedIn post about the Tantra AI project.\n\n"
-                "Context:\n" + _TANTRA_BUILD_CONTEXT
+                "Write a LinkedIn post about this specific moment from the Tantra AI build:\n\n"
+                f"{angle_text}\n\n"
+                "Use only this angle. Do not mix in other topics."
             ),
             system=_HUMAN_POST_STYLE,
             max_tokens=250,
@@ -848,10 +907,11 @@ def post_tantra_progress(self) -> dict:
         return {"success": False, "error": f"Zernio publish failed: {exc}"}
 
     if result.get("success"):
-        # Set 1-hour cooldown in Redis
+        # Set 24-hour cooldown + save which angle was used so next run picks the next one
         try:
             r = _get_redis_client()
-            r.setex("tantra:progress_post:cooldown", 3600, "1")
+            r.setex("tantra:progress_post:cooldown", 86400, "1")   # 24h
+            r.set(_STORY_ANGLE_KEY, next_angle)
         except Exception:
             pass
 
