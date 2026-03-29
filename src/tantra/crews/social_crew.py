@@ -1,13 +1,14 @@
 """
 Tantra AI — Social Media Crew (Phase 1)
-CrewAI hierarchical crew for LinkedIn + YouTube content operations.
+CrewAI sequential crew for LinkedIn + YouTube content operations.
 
-Hierarchy:
-  CMO (LeaderAgent, director tier)
-    ├─ Researcher   (WorkerAgent, manager tier)  — trend analysis
-    ├─ ContentWriter (WorkerAgent, worker tier)  — post/script writing
-    ├─ Publisher    (WorkerAgent, worker tier)   — platform distribution
-    └─ Analyst      (WorkerAgent, worker tier)   — performance tracking
+Pipeline (sequential):
+  Researcher   (manager tier → phi4:14b)  — trend analysis
+  ContentWriter (worker tier → phi4:14b)  — post/script writing
+  Publisher    (worker tier → phi4:14b)   — platform distribution
+  Analyst      (worker tier → phi4:14b)   — performance tracking
+
+CMO (director tier) is reserved for the Phase 2 Director planning crew.
 """
 from __future__ import annotations
 
@@ -83,28 +84,13 @@ def build_social_media_crew(verbose: bool = True) -> Crew:
     """
     Build and return the Social Media CrewAI crew.
 
+    Sequential process: research → write_linkedin → write_youtube → analyse
+    CMO agent lives in the Director planning crew (Phase 2) — not used here.
+
     Returns a Crew object ready to execute social media content tasks.
     """
     llm_base = f"{settings.litellm_base_url}/v1"
     llm_key = settings.litellm_key
-
-    # ── CMO — Chief Marketing Officer ────────────────────────────────────────
-    cmo = Agent(
-        role="Chief Marketing Officer",
-        goal=(
-            "Drive maximum engagement and follower growth on LinkedIn and YouTube "
-            "through strategic content planning and data-driven decisions."
-        ),
-        backstory=(
-            "You are a world-class CMO with 15 years of experience in digital marketing. "
-            "You understand what resonates with professional audiences on LinkedIn and "
-            "content-hungry viewers on YouTube. You think in campaigns, not single posts."
-        ),
-        llm=_make_llm(ModelTier.director, llm_base, llm_key),
-        max_iter=settings.agent_max_iterations,
-        verbose=verbose,
-        allow_delegation=True,
-    )
 
     # ── Researcher ────────────────────────────────────────────────────────────
     researcher = Agent(
