@@ -42,12 +42,8 @@ for key in ["id", "createdAt", "updatedAt", "triggerCount",
             "versionId", "pinData", "staticData"]:
     wf.pop(key, None)
 
-# tags: API accepts only list of name strings
-raw_tags = wf.get("tags", [])
-wf["tags"] = [
-    t["name"] if isinstance(t, dict) else t
-    for t in raw_tags
-]
+# tags: read-only on create endpoint — remove entirely
+wf.pop("tags", None)
 
 # settings: only keep fields the API schema accepts
 # callerPolicy, errorWorkflow (empty string) are UI-only and get rejected
