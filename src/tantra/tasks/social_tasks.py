@@ -540,14 +540,17 @@ _HUMAN_COMMENT_STYLE = """
 You write LinkedIn comments like a real person — not a marketing bot.
 
 Rules (non-negotiable):
-- Under 60 words. Be brief.
+- Under 40 words. Shorter is better.
 - Write exactly like you'd text a smart colleague. No formality.
-- No emojis, no bullet points, no "great post!", no "absolutely agree!"
+- NEVER start with "That's", "Great", "Impressive", "Interesting", "Absolutely", "I agree".
+  Jump straight into your thought.
+- No emojis. None. Not even one.
 - No AI/business jargon: never use "leverage", "synergy", "space", "ecosystem",
-  "paradigm", "utilize", "moving the needle", "thought leadership"
-- Share ONE specific thought or question. Not a summary of what they said.
+  "paradigm", "utilize", "moving the needle", "thought leadership", "intriguing"
+- Share ONE specific thought or a short direct question. Not a summary of what they said.
+- Do NOT end with a question. Make a statement or observation.
 - It should sound like it came from a real engineering manager, not a content bot.
-- No hashtags in comments.
+- No hashtags. No meta-commentary. Output ONLY the comment text, nothing else.
 """
 
 _AI_TOPIC_KEYWORDS = [
@@ -613,6 +616,45 @@ def _llm_generate(prompt: str, system: str, max_tokens: int = 200) -> str:
     return response.choices[0].message.content.strip()
 
 
+# Patterns the LLM sometimes appends that should never appear in published text
+_LLM_GARBAGE_PATTERNS = [
+    r"\n---+\n.*",               # markdown separator + trailing chat text
+    r"\n\*\*Note:.*",            # "**Note: ..."
+    r"\nLet me know.*",          # "Let me know if ..."
+    r"\nFeel free.*",            # "Feel free to ..."
+    r"\nI hope.*",               # "I hope this helps"
+    r"\nPlease let me know.*",   # "Please let me know ..."
+    r"\n_.*_$",                  # trailing italics disclaimer
+]
+
+
+def _clean_llm_output(text: str) -> str:
+    """Strip common LLM meta-commentary artifacts from generated text."""
+    import re
+    for pattern in _LLM_GARBAGE_PATTERNS:
+        text = re.sub(pattern, "", text, flags=re.DOTALL | re.IGNORECASE)
+    return text.strip().strip('"').strip("'")
+
+
+def _claim_post(post_id: str, ttl_seconds: int = 86400 * 7) -> bool:
+    """
+    Atomically claim a post for commenting using Redis SETNX.
+    Returns True if this worker claimed it, False if another already has it.
+    Prevents race conditions when multiple Celery workers run concurrently.
+    """
+    try:
+        r = _get_redis_client()
+        key = f"tantra:commented:{post_id}"
+        # SETNX sets key only if it doesn't exist — atomic, no race
+        claimed = r.setnx(key, "1")
+        if claimed:
+            r.expire(key, ttl_seconds)
+        return bool(claimed)
+    except Exception as exc:
+        logger.warning("Redis claim_post failed for %s: %s — proceeding anyway", post_id, exc)
+        return True  # If Redis is down, allow it rather than silently dropping
+
+
 @app.task(bind=True, name="tantra.tasks.social.linkedin_engage_feed", queue="social")
 def linkedin_engage_feed(self) -> dict:
     """
@@ -647,7 +689,7 @@ def linkedin_engage_feed(self) -> dict:
         logger.error("list_posts failed: %s", exc)
         return {"success": False, "error": str(exc)}
 
-    # Step 2: Filter for AI-topic posts not yet engaged
+    # Step 2: Filter for AI-topic posts not yet claimed
     ai_posts = []
     for p in posts_raw:
         pd = _obj_to_dict(p) if not isinstance(p, dict) else p
@@ -666,16 +708,21 @@ def linkedin_engage_feed(self) -> dict:
     engaged = 0
     errors = []
     for post in ai_posts[:2]:
+        # Atomically claim the post before generating — prevents concurrent runs
+        # from both generating a comment for the same post (race condition fix)
+        if not _claim_post(post["id"]):
+            logger.info("Post %s already claimed by another worker — skipping", post["id"])
+            continue
+
         try:
-            comment_text = _llm_generate(
+            comment_text = _clean_llm_output(_llm_generate(
                 prompt=(
                     f"Post content:\n{post['content'][:600]}\n\n"
-                    "Write a short, genuine comment to add to this post."
+                    "Write a short comment for this post."
                 ),
                 system=_HUMAN_COMMENT_STYLE,
-                max_tokens=120,
-            )
-            comment_text = comment_text.strip().strip('"')
+                max_tokens=100,
+            ))
 
             # Attempt to post comment via Zernio comments API (may not be supported)
             try:
@@ -687,7 +734,6 @@ def linkedin_engage_feed(self) -> dict:
                     )
                 )
                 logger.info("Comment posted on post %s: %s", post["id"], comment_text[:80])
-                _mark_commented(post["id"])
                 engaged += 1
             except AttributeError:
                 # Zernio SDK doesn't support comments yet — log for manual review
@@ -696,14 +742,13 @@ def linkedin_engage_feed(self) -> dict:
                     "Post ID: %s\nComment: %s",
                     post["id"], comment_text,
                 )
-                _mark_commented(post["id"])  # Mark to avoid regenerating same comment
                 engaged += 1
             except Exception as ce:
                 logger.warning("Comment failed for post %s: %s", post["id"], ce)
                 errors.append(str(ce))
 
         except Exception as exc:
-            logger.error("Comment generation failed: %s", exc)
+            logger.error("Comment generation failed for post %s: %s", post["id"], exc)
             errors.append(str(exc))
 
     return {
@@ -782,7 +827,7 @@ def post_tantra_progress(self) -> dict:
             system=_HUMAN_POST_STYLE,
             max_tokens=250,
         )
-        post_text = post_text.strip().strip('"')
+        post_text = _clean_llm_output(post_text)
         logger.info("Generated progress post (%d chars): %s...", len(post_text), post_text[:100])
     except Exception as exc:
         logger.error("LLM post generation failed: %s", exc)
