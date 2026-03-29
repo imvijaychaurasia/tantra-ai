@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Tantra AI — Import n8n approval workflow via API
-# Usage: bash n8n/import_workflow.sh
-# Requires: N8N_TOKEN env var (or set inline below)
+# Usage: bash n8n/import_workflow.sh   (run from repo root)
+# Requires: N8N_TOKEN env var set before calling
 set -euo pipefail
 
 # ── Config ───────────────────────────────────────────────────────────────────
@@ -16,16 +16,24 @@ if [[ -z "$N8N_TOKEN" ]]; then
   exit 1
 fi
 
+# ── Resolve the JSON source relative to the repo root ────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SRC_JSON="${SCRIPT_DIR}/tantra_linkedin_approval_workflow.json"
+
+if [[ ! -f "$SRC_JSON" ]]; then
+  echo "ERROR: workflow JSON not found at $SRC_JSON"
+  exit 1
+fi
+
+echo "Source: $SRC_JSON"
+
 # ── Build minimal workflow JSON ───────────────────────────────────────────────
 # n8n v1 API rejects: id, createdAt, updatedAt, triggerCount, versionId,
 # pinData, staticData, and tag objects (only tag name strings are accepted).
-# Node-level 'notes' IS valid — keep it.
+python3 - "$SRC_JSON" <<'PYEOF'
+import json, sys
 
-python3 - <<'PYEOF'
-import json, os, sys
-
-src = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                   "tantra_linkedin_approval_workflow.json")
+src = sys.argv[1]
 with open(src) as f:
     wf = json.load(f)
 
@@ -34,14 +42,14 @@ for key in ["id", "createdAt", "updatedAt", "triggerCount",
             "versionId", "pinData", "staticData"]:
     wf.pop(key, None)
 
-# tags: API accepts only list of name strings (it creates/links them)
+# tags: API accepts only list of name strings
 raw_tags = wf.get("tags", [])
 wf["tags"] = [
     t["name"] if isinstance(t, dict) else t
     for t in raw_tags
 ]
 
-# settings: strip empty errorWorkflow (causes schema validation error in some versions)
+# settings: strip empty errorWorkflow string (schema error in some n8n versions)
 settings = wf.get("settings", {})
 if settings.get("errorWorkflow") == "":
     settings.pop("errorWorkflow")
@@ -66,14 +74,30 @@ RESULT=$(curl -s -X POST "${N8N_URL}/api/v1/workflows" \
 echo "$RESULT" | python3 -m json.tool 2>/dev/null || echo "$RESULT"
 
 # Check success
-WF_ID=$(echo "$RESULT" | python3 -c "import json,sys; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || true)
+WF_ID=$(echo "$RESULT" | python3 -c \
+  "import json,sys; d=json.load(sys.stdin); print(d.get('id',''))" 2>/dev/null || true)
+
 if [[ -n "$WF_ID" ]]; then
   echo ""
   echo "✅ Workflow imported! ID: $WF_ID"
-  echo "   Activate it: curl -s -X PATCH ${N8N_URL}/api/v1/workflows/${WF_ID} \\"
-  echo "     -H 'Content-Type: application/json' \\"
-  echo "     -H 'X-N8N-API-KEY: \${N8N_TOKEN}' \\"
-  echo "     -d '{\"active\": true}' | python3 -m json.tool"
+  echo ""
+  echo "Activating workflow..."
+  ACTIVATE=$(curl -s -X PATCH "${N8N_URL}/api/v1/workflows/${WF_ID}" \
+    -H "Content-Type: application/json" \
+    -H "X-N8N-API-KEY: ${N8N_TOKEN}" \
+    -d '{"active": true}')
+  ACTIVE=$(echo "$ACTIVATE" | python3 -c \
+    "import json,sys; d=json.load(sys.stdin); print(d.get('active',''))" 2>/dev/null || true)
+  if [[ "$ACTIVE" == "True" ]] || [[ "$ACTIVE" == "true" ]]; then
+    echo "✅ Workflow activated! Open: ${N8N_URL}/workflow/${WF_ID}"
+  else
+    echo "⚠️  Activate manually: ${N8N_URL}/workflow/${WF_ID} → toggle Active"
+    echo "   Or run:"
+    echo "   curl -s -X PATCH ${N8N_URL}/api/v1/workflows/${WF_ID} \\"
+    echo "     -H 'Content-Type: application/json' \\"
+    echo "     -H \"X-N8N-API-KEY: \${N8N_TOKEN}\" \\"
+    echo "     -d '{\"active\": true}'"
+  fi
 else
   echo ""
   echo "❌ Import may have failed — check the response above."
