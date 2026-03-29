@@ -60,7 +60,7 @@ with open(out, "w") as f:
 
 print(f"Clean workflow written to {out}")
 print("Top-level keys:", list(wf.keys()))
-print("Tags:", wf["tags"])
+print("Settings:", wf["settings"])
 PYEOF
 
 echo ""
