@@ -1,0 +1,83 @@
+{
+  "version": "1",
+  "registry": "tantra-hub",
+  "updated_at": "2026-03-29T00:00:00Z",
+  "skills": [
+    {
+      "name": "linkedin-human-post",
+      "version": "1.0.0",
+      "description": "Write LinkedIn posts in a human, non-corporate tone about the Tantra AI build journey",
+      "author": "vijaychaurasia",
+      "category": "social",
+      "platform": "linkedin",
+      "tags": ["linkedin", "writing", "social-media", "human-tone", "tantra-ai"],
+      "homepage": "https://github.com/imvijaychaurasia/tantra-ai",
+      "source": "builtin",
+      "downloads": 0
+    },
+    {
+      "name": "linkedin-human-comment",
+      "version": "1.0.0",
+      "description": "Write LinkedIn comments in a genuine, non-sycophantic human tone — under 40 words",
+      "author": "vijaychaurasia",
+      "category": "social",
+      "platform": "linkedin",
+      "tags": ["linkedin", "commenting", "engagement", "human-tone"],
+      "homepage": "https://github.com/imvijaychaurasia/tantra-ai",
+      "source": "builtin",
+      "downloads": 0
+    },
+    {
+      "name": "social-researcher",
+      "version": "1.0.0",
+      "description": "Research AI and tech topics and produce structured LinkedIn-ready content briefs",
+      "author": "vijaychaurasia",
+      "category": "research",
+      "platform": "linkedin",
+      "tags": ["research", "content", "linkedin", "ai-topics"],
+      "homepage": "https://github.com/imvijaychaurasia/tantra-ai",
+      "source": "builtin",
+      "downloads": 0
+    },
+    {
+      "name": "tantra-build-context",
+      "version": "1.0.0",
+      "description": "Context about the Tantra AI project and its build journey for use in content generation",
+      "author": "vijaychaurasia",
+      "category": "context",
+      "platform": "any",
+      "tags": ["tantra-ai", "context", "build-journey"],
+      "homepage": "https://github.com/imvijaychaurasia/tantra-ai",
+      "source": "builtin",
+      "downloads": 0
+    },
+    {
+      "name": "post-approver",
+      "version": "1.0.0",
+      "description": "Review AI-generated LinkedIn drafts and decide approve or reject with a reason",
+      "author": "vijaychaurasia",
+      "category": "review",
+      "platform": "linkedin",
+      "tags": ["review", "approval", "quality-gate", "linkedin"],
+      "homepage": "https://github.com/imvijaychaurasia/tantra-ai",
+      "source": "builtin",
+      "downloads": 0
+    }
+  ],
+  "plugins": [
+    {
+      "name": "social-linkedin",
+      "version": "1.0.0",
+      "description": "LinkedIn content pipeline — research, draft, approve, publish, engage",
+      "author": "vijaychaurasia",
+      "capabilities": {
+        "celery_tasks": 4,
+        "api_routes": 2,
+        "tools": 1,
+        "skills": 5
+      },
+      "homepage": "https://github.com/imvijaychaurasia/tantra-ai",
+      "source": "builtin"
+    }
+  ]
+}

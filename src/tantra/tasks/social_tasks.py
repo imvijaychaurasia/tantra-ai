@@ -636,6 +636,23 @@ def _clean_llm_output(text: str) -> str:
     return text.strip().strip('"').strip("'")
 
 
+def _load_skill_instructions(skill_name: str, fallback: str) -> str:
+    """
+    Load the `instructions` field from a SKILL.md file via SkillLoader.
+    Falls back to the supplied constant if the skill is not loaded or has no instructions.
+    This allows SKILL.md files to be the single source of truth for prompt style rules.
+    """
+    try:
+        from tantra.skills.loader import get_loader
+        loader = get_loader()
+        skill = loader.get(skill_name)
+        if skill and skill.instructions:
+            return skill.instructions
+    except Exception as exc:
+        logger.debug("SkillLoader unavailable, using fallback for %s: %s", skill_name, exc)
+    return fallback
+
+
 def _claim_post(post_id: str, ttl_seconds: int = 86400 * 7) -> bool:
     """
     Atomically claim a post for commenting using Redis SETNX.
@@ -715,12 +732,15 @@ def linkedin_engage_feed(self) -> dict:
             continue
 
         try:
+            comment_style = _load_skill_instructions(
+                "linkedin-human-comment", fallback=_HUMAN_COMMENT_STYLE
+            )
             comment_text = _clean_llm_output(_llm_generate(
                 prompt=(
                     f"Post content:\n{post['content'][:600]}\n\n"
                     "Write a short comment for this post."
                 ),
-                system=_HUMAN_COMMENT_STYLE,
+                system=comment_style,
                 max_tokens=100,
             ))
 
@@ -876,6 +896,9 @@ def post_tantra_progress(self) -> dict:
         angle_text = _TANTRA_STORY_ANGLES[0]
 
     # Generate the post using LiteLLM worker tier (phi4:14b)
+    post_style = _load_skill_instructions(
+        "linkedin-human-post", fallback=_HUMAN_POST_STYLE
+    )
     try:
         post_text = _llm_generate(
             prompt=(
@@ -883,7 +906,7 @@ def post_tantra_progress(self) -> dict:
                 f"{angle_text}\n\n"
                 "Use only this angle. Do not mix in other topics."
             ),
-            system=_HUMAN_POST_STYLE,
+            system=post_style,
             max_tokens=250,
         )
         post_text = _clean_llm_output(post_text)

@@ -597,4 +597,147 @@ async def search_memory(request: MemorySearchRequest) -> JSONResponse:
     mem = MemoryManager(namespace=request.namespace)
     await mem.init()
     results = await mem.search(query=request.query, top_k=request.top_k)
+
     return JSONResponse({"results": results})
+
+
+# ---------------------------------------------------------------------------
+# Skills + Plugins API  (Phase 2 Milestone 1)
+# ---------------------------------------------------------------------------
+
+class SkillInstallRequest(BaseModel):
+    slug: str = Field(..., description="Skill slug, 'user/repo', or 'user/repo:path'")
+    overwrite: bool = Field(False, description="Overwrite if already installed")
+
+
+class PluginInstallRequest(BaseModel):
+    path: str = Field(..., description="Local path to plugin directory")
+    overwrite: bool = Field(False, description="Overwrite if already installed")
+
+
+@router.get("/skills", tags=["skills"])
+async def list_skills(
+    category: Optional[str] = Query(None, description="Filter by category"),
+    platform: Optional[str] = Query(None, description="Filter by platform"),
+    source: str = Query("all", description="all | builtin | installed"),
+) -> JSONResponse:
+    """List all available skills (built-in + installed)."""
+    from tantra.skills.loader import get_loader
+    from tantra.skills.registry import SkillRegistry
+
+    loader = get_loader()
+    loaded = loader.list(category=category, platform=platform)
+
+    reg = SkillRegistry()
+    builtin = reg.list_builtin()
+    installed = reg.list_installed()
+
+    if source == "builtin":
+        return JSONResponse({"skills": builtin, "total": len(builtin)})
+    elif source == "installed":
+        return JSONResponse({"skills": installed, "total": len(installed)})
+
+    # Merge: loaded skills (gate-passed) + registry metadata
+    result = [s.to_dict() for s in loaded]
+    return JSONResponse({"skills": result, "total": len(result)})
+
+
+@router.get("/skills/{name}", tags=["skills"])
+async def get_skill(name: str) -> JSONResponse:
+    """Get full details for a skill including its instructions."""
+    from tantra.skills.loader import get_loader
+
+    loader = get_loader()
+    skill = loader.get(name)
+    if not skill:
+        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
+
+    data = skill.to_dict()
+    data["instructions"] = skill.instructions
+    data["prompt_block"] = skill.instructions  # alias
+    return JSONResponse(data)
+
+
+@router.post("/skills/install", tags=["skills"])
+async def install_skill(request: SkillInstallRequest) -> JSONResponse:
+    """Install a skill from built-in, GitHub, or local path."""
+    try:
+        from tantra.skills.installer import install
+        result = install(request.slug, overwrite=request.overwrite)
+        return JSONResponse({"success": True, "skill": result})
+    except FileExistsError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/skills/{name}", tags=["skills"])
+async def uninstall_skill(name: str) -> JSONResponse:
+    """Uninstall a user-installed skill."""
+    from tantra.skills.installer import uninstall
+    success = uninstall(name)
+    if not success:
+        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found in user installs")
+    return JSONResponse({"success": True, "uninstalled": name})
+
+
+@router.get("/skills/{name}/prompt", tags=["skills"])
+async def get_skill_prompt(name: str) -> JSONResponse:
+    """Get the system prompt block for a skill (for direct injection)."""
+    from tantra.skills.loader import get_loader
+    loader = get_loader()
+    skill = loader.get(name)
+    if not skill:
+        raise HTTPException(status_code=404, detail=f"Skill '{name}' not found")
+    return JSONResponse({"name": name, "prompt": skill.instructions})
+
+
+@router.get("/plugins", tags=["plugins"])
+async def list_plugins() -> JSONResponse:
+    """List all available plugins."""
+    from tantra.plugins.registry import PluginRegistry
+    reg = PluginRegistry()
+    plugins = reg.list_all()
+    return JSONResponse({"plugins": plugins, "total": len(plugins)})
+
+
+@router.get("/plugins/{name}", tags=["plugins"])
+async def get_plugin(name: str) -> JSONResponse:
+    """Get details for a plugin."""
+    from tantra.plugins.loader import get_loader
+    loader = get_loader()
+    plugin = loader.get(name)
+    if not plugin:
+        raise HTTPException(status_code=404, detail=f"Plugin '{name}' not found")
+    return JSONResponse(plugin.to_dict())
+
+
+@router.post("/plugins/install", tags=["plugins"])
+async def install_plugin(request: PluginInstallRequest) -> JSONResponse:
+    """Install a plugin from a local path."""
+    from pathlib import Path
+    from tantra.plugins.registry import PluginRegistry
+    try:
+        reg = PluginRegistry()
+        result = reg.install_from_path(Path(request.path), overwrite=request.overwrite)
+        return JSONResponse({"success": True, "plugin": result})
+    except FileExistsError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/hub/index", tags=["hub"])
+async def hub_index() -> JSONResponse:
+    """
+    TantraHub registry index — lists all available skills and plugins.
+    This is the discovery endpoint for `tantra skills search`.
+    """
+    import json
+    from pathlib import Path
+    index_path = Path(__file__).parents[4] / "tantra-hub" / "index.json"
+    if not index_path.exists():
+        return JSONResponse({"skills": [], "plugins": []})
+    return JSONResponse(json.loads(index_path.read_text()))
