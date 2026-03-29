@@ -49,11 +49,14 @@ wf["tags"] = [
     for t in raw_tags
 ]
 
-# settings: strip empty errorWorkflow string (schema error in some n8n versions)
+# settings: only keep fields the API schema accepts
+# callerPolicy, errorWorkflow (empty string) are UI-only and get rejected
+ALLOWED_SETTINGS = {
+    "executionOrder", "saveManualExecutions", "saveDataErrorExecution",
+    "saveDataSuccessExecution", "saveExecutionProgress", "timezone",
+}
 settings = wf.get("settings", {})
-if settings.get("errorWorkflow") == "":
-    settings.pop("errorWorkflow")
-wf["settings"] = settings
+wf["settings"] = {k: v for k, v in settings.items() if k in ALLOWED_SETTINGS}
 
 out = "/tmp/wf_clean.json"
 with open(out, "w") as f:
