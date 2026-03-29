@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# =============================================================================
+# Tantra AI — host CLI wrapper
+# तंत्र · Run the tantra command without pip-installing the package
+#
+# Usage (one-time setup):
+#   chmod +x bin/tantra
+#   sudo ln -s "$(pwd)/bin/tantra" /usr/local/bin/tantra
+#   # OR: add tantra-ai/bin to your PATH in ~/.bashrc / ~/.zshrc
+#
+# Then from anywhere:
+#   tantra skills list
+#   tantra skills info humanizer
+#   tantra plugins list
+#   tantra status
+# =============================================================================
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(dirname "$SCRIPT_DIR")"
+SRC_DIR="$REPO_DIR/src"
+
+# ── Resolve Python interpreter ───────────────────────────────────────────────
+# Try in order: .venv (project venv), venv, system python3
+if [ -f "$REPO_DIR/.venv/bin/python" ]; then
+    PYTHON="$REPO_DIR/.venv/bin/python"
+elif [ -f "$REPO_DIR/venv/bin/python" ]; then
+    PYTHON="$REPO_DIR/venv/bin/python"
+elif command -v python3 &>/dev/null; then
+    PYTHON="python3"
+else
+    echo "tantra: Python 3 not found. Install Python 3.11+ and try again." >&2
+    exit 1
+fi
+
+# ── Run the CLI ──────────────────────────────────────────────────────────────
+# PYTHONPATH ensures 'tantra' package is found from src/ without installation
+export PYTHONPATH="$SRC_DIR${PYTHONPATH:+:$PYTHONPATH}"
+exec "$PYTHON" -m tantra "$@"
