@@ -405,14 +405,30 @@ class ZernioClient:
             result = await self._client.posts.acreate(**kwargs)
             raw = getattr(result, "post", result)
             post = _obj_to_dict(raw) if raw is not None else {}
-            post_id = post.get("_id", post.get("id", ""))
+            # SDK stores the post ID under field_id (same as accounts)
+            post_id = post.get("field_id", post.get("_id", post.get("id", "")))
             platform_results = post.get("platforms", [])
 
-            logger.info("Zernio post created: %s → platforms=%s", post_id, platform_list)
+            # Normalise each platform entry and extract platformPostId (URN)
+            normalised_platforms = []
+            for pr in (platform_results if isinstance(platform_results, list) else []):
+                pd = _obj_to_dict(pr) if not isinstance(pr, dict) else pr
+                normalised_platforms.append(pd)
+
+            # Extract the first LinkedIn URN for convenience
+            platform_post_id = ""
+            for pd in normalised_platforms:
+                if pd.get("platformPostId"):
+                    platform_post_id = pd["platformPostId"]
+                    break
+
+            logger.info("Zernio post created: %s (%s) → platforms=%s",
+                        post_id, platform_post_id, [p.get("platform") for p in normalised_platforms])
             return {
                 "success": True,
                 "post_id": post_id,
-                "platforms": platform_results,
+                "platform_post_id": platform_post_id,   # e.g. urn:li:share:...
+                "platforms": normalised_platforms,
                 "scheduled": scheduled_for is not None,
             }
 

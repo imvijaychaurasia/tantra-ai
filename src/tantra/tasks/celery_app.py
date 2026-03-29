@@ -33,7 +33,7 @@ app.config_from_object({
     # autodiscover_tasks() only works for packages (directories with tasks.py),
     # not for single-file modules like social_tasks.py — use include= instead.
     "include": [
-        "tantra.tasks.social_tasks",   # Phase 1: LinkedIn pipeline tasks
+        "tantra.tasks.social_tasks",   # Phase 1: LinkedIn pipeline + engagement tasks
     ],
 
     # Queues
@@ -74,6 +74,25 @@ app.conf.beat_schedule = {
     "linkedin-publish-approved": {
         "task": "tantra.tasks.social.publish_approved_linkedin_posts",
         "schedule": crontab(hour=9, minute=0, day_of_week="1-5"),
+        "options": {"queue": "social"},
+    },
+
+    # ── Phase 1: Engagement + Progress tasks ─────────────────────────────────
+
+    # Task 3: Find AI posts in LinkedIn feed → comment in human tone
+    # Every 5 min for testing. Change to crontab(minute="*/30") for production.
+    "linkedin-engage-feed": {
+        "task": "tantra.tasks.social.linkedin_engage_feed",
+        "schedule": crontab(minute="*/5"),
+        "options": {"queue": "social"},
+    },
+
+    # Task 4: Write + publish a human-tone post about the Tantra AI build
+    # Every 5 min for testing (1-hour Redis cooldown prevents spam).
+    # Change schedule to crontab(hour=10, minute=0) for daily prod posting.
+    "tantra-progress-post": {
+        "task": "tantra.tasks.social.post_tantra_progress",
+        "schedule": crontab(minute="*/5"),
         "options": {"queue": "social"},
     },
 

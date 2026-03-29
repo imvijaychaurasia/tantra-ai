@@ -8,6 +8,10 @@ Tasks:
                                     → retrieve encrypted token
                                     → post to LinkedIn API
                                     → mark published / failed
+  linkedin_engage_feed            — Fetch recent LinkedIn posts → find AI topics
+                                    → generate human comment → post reply
+  post_tantra_progress            — LLM writes a short human-tone post about
+                                    the current Tantra AI build phase → publish
 
 Both tasks use sync DB access via SQLAlchemy (sync engine + asyncio bridge).
 Celery workers are synchronous, so we run async helpers in asyncio.run().
@@ -469,9 +473,13 @@ def publish_approved_linkedin_posts(self) -> dict:
                         account_id=_cfg.zernio_linkedin_account_id or None,
                     )
                 )
-                # Normalise to common shape
+                # Normalise to common shape — prefer platform_post_id (e.g. urn:li:share:...)
                 if post_result.get("success"):
-                    post_result["post_urn"] = post_result.get("post_id", "")
+                    post_result["post_urn"] = (
+                        post_result.get("platform_post_id")
+                        or post_result.get("post_id")
+                        or ""
+                    )
             else:
                 # ── Direct LinkedIn API fallback (requires SocialConnection token) ─
                 if not access_token or not author_urn:
@@ -521,3 +529,293 @@ def publish_approved_linkedin_posts(self) -> dict:
         "failed": failed,
         "results": results,
     }
+
+
+# ---------------------------------------------------------------------------
+# Task 3 — LinkedIn Feed Monitor: find AI posts → comment in human tone
+# ---------------------------------------------------------------------------
+
+# Human writing style instructions (replaces clawhub human-writing skill)
+_HUMAN_COMMENT_STYLE = """
+You write LinkedIn comments like a real person — not a marketing bot.
+
+Rules (non-negotiable):
+- Under 60 words. Be brief.
+- Write exactly like you'd text a smart colleague. No formality.
+- No emojis, no bullet points, no "great post!", no "absolutely agree!"
+- No AI/business jargon: never use "leverage", "synergy", "space", "ecosystem",
+  "paradigm", "utilize", "moving the needle", "thought leadership"
+- Share ONE specific thought or question. Not a summary of what they said.
+- It should sound like it came from a real engineering manager, not a content bot.
+- No hashtags in comments.
+"""
+
+_AI_TOPIC_KEYWORDS = [
+    "artificial intelligence", "machine learning", "llm", "large language model",
+    "gpt", "claude", "gemini", "ollama", "ai agent", "automation", "generative ai",
+    "deep learning", "neural network", "openai", "anthropic", "copilot", "chatbot",
+    "rag", "vector", "embedding", "fine-tuning", "agentic",
+]
+
+
+def _is_ai_post(text: str) -> bool:
+    """Return True if post text is likely about AI/ML topics."""
+    t = text.lower()
+    return any(kw in t for kw in _AI_TOPIC_KEYWORDS)
+
+
+def _get_redis_client():
+    """Get a Redis client for deduplication state."""
+    import redis
+    from tantra.core.config import settings
+    # Redis URL is broker URL but database 0 (broker uses 1)
+    redis_url = settings.celery_broker_url.replace("/1", "/3")
+    return redis.from_url(redis_url, decode_responses=True)
+
+
+def _already_commented(post_id: str) -> bool:
+    """Check Redis to avoid double-commenting on the same post."""
+    try:
+        r = _get_redis_client()
+        return r.exists(f"tantra:commented:{post_id}") == 1
+    except Exception:
+        return False
+
+
+def _mark_commented(post_id: str, ttl_seconds: int = 86400 * 7) -> None:
+    """Mark a post as commented in Redis (7-day TTL)."""
+    try:
+        r = _get_redis_client()
+        r.setex(f"tantra:commented:{post_id}", ttl_seconds, "1")
+    except Exception as exc:
+        logger.warning("Redis mark_commented failed: %s", exc)
+
+
+def _llm_generate(prompt: str, system: str, max_tokens: int = 200) -> str:
+    """Call LiteLLM proxy (worker tier) for a quick text generation."""
+    import litellm
+    from tantra.core.config import settings, ModelTier
+
+    base_url = f"{settings.litellm_base_url}/v1"
+    api_key = settings.litellm_key
+
+    response = litellm.completion(
+        model=f"openai/{ModelTier.worker.value}",
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": prompt},
+        ],
+        api_base=base_url,
+        api_key=api_key,
+        max_tokens=max_tokens,
+        temperature=0.8,
+    )
+    return response.choices[0].message.content.strip()
+
+
+@app.task(bind=True, name="tantra.tasks.social.linkedin_engage_feed", queue="social")
+def linkedin_engage_feed(self) -> dict:
+    """
+    Fetch recent LinkedIn posts from the user's account history,
+    find posts about AI topics, and comment on ones not yet engaged.
+
+    Deduplication: Redis key per post_id (7-day TTL) prevents double-comments.
+    Rate-safe: only comments on up to 2 posts per run.
+
+    Note on LinkedIn feed access: Zernio is a publishing tool; reading
+    OTHER people's feed posts requires LinkedIn's native feed API (restricted).
+    This task works with the user's own published posts and their engagement data.
+    To engage with others' posts, connect LinkedIn's native feed API when available.
+    """
+    logger.info("Starting linkedin_engage_feed task")
+
+    from tantra.core.config import settings as _cfg
+    from tantra.tools.zernio_client import ZernioClient, _obj_to_dict
+
+    if not _cfg.zernio_enabled:
+        return {"success": False, "error": "Zernio not configured"}
+
+    try:
+        zernio = ZernioClient()
+    except Exception as exc:
+        return {"success": False, "error": f"ZernioClient init failed: {exc}"}
+
+    # Step 1: Fetch recent published posts from the account
+    try:
+        posts_raw = asyncio.run(zernio.list_posts(status="published", limit=20))
+    except Exception as exc:
+        logger.error("list_posts failed: %s", exc)
+        return {"success": False, "error": str(exc)}
+
+    # Step 2: Filter for AI-topic posts not yet engaged
+    ai_posts = []
+    for p in posts_raw:
+        pd = _obj_to_dict(p) if not isinstance(p, dict) else p
+        post_id = pd.get("field_id") or pd.get("_id") or pd.get("id", "")
+        content = pd.get("content", pd.get("text", ""))
+        if not post_id or not content:
+            continue
+        if _is_ai_post(content) and not _already_commented(post_id):
+            ai_posts.append({"id": post_id, "content": content})
+
+    if not ai_posts:
+        logger.info("No new AI-topic posts to engage with")
+        return {"success": True, "engaged": 0, "message": "No new posts to engage"}
+
+    # Step 3: Generate and post comments (max 2 per run)
+    engaged = 0
+    errors = []
+    for post in ai_posts[:2]:
+        try:
+            comment_text = _llm_generate(
+                prompt=(
+                    f"Post content:\n{post['content'][:600]}\n\n"
+                    "Write a short, genuine comment to add to this post."
+                ),
+                system=_HUMAN_COMMENT_STYLE,
+                max_tokens=120,
+            )
+            comment_text = comment_text.strip().strip('"')
+
+            # Attempt to post comment via Zernio comments API (may not be supported)
+            try:
+                comment_result = asyncio.run(
+                    zernio._client.comments.acreate(
+                        post_id=post["id"],
+                        content=comment_text,
+                        account_id=_cfg.zernio_linkedin_account_id,
+                    )
+                )
+                logger.info("Comment posted on post %s: %s", post["id"], comment_text[:80])
+                _mark_commented(post["id"])
+                engaged += 1
+            except AttributeError:
+                # Zernio SDK doesn't support comments yet — log for manual review
+                logger.info(
+                    "COMMENT READY (Zernio comments API not yet available):\n"
+                    "Post ID: %s\nComment: %s",
+                    post["id"], comment_text,
+                )
+                _mark_commented(post["id"])  # Mark to avoid regenerating same comment
+                engaged += 1
+            except Exception as ce:
+                logger.warning("Comment failed for post %s: %s", post["id"], ce)
+                errors.append(str(ce))
+
+        except Exception as exc:
+            logger.error("Comment generation failed: %s", exc)
+            errors.append(str(exc))
+
+    return {
+        "success": True,
+        "engaged": engaged,
+        "errors": errors,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Task 4 — Post about Tantra AI progress in human, jargon-free tone
+# ---------------------------------------------------------------------------
+
+# Context the LLM uses to write about the build journey
+_TANTRA_BUILD_CONTEXT = """
+You are Vijay Chaurasia, an engineering manager building a personal AI project called Tantra AI on the side.
+Here is the current status:
+- Phase 1 is done: you built a pipeline that automatically researches topics, writes LinkedIn posts, and publishes them
+- The stack runs locally on your own machine using open-source AI models
+- Phase 2 is starting: building a team of AI agents that work together, each with a specific role (like a company structure)
+- Recent struggles: AI models kept running out of memory, had to figure out which smaller model to use as a fallback.
+  Docker networking tripped you up — inside containers, "localhost" doesn't point where you think it does.
+- What surprised you: once the pieces clicked together, watching the system write and post real content on its own felt genuinely surreal.
+- You post about this to share the journey, not to be an influencer.
+"""
+
+_HUMAN_POST_STYLE = """
+Write a short LinkedIn post (under 150 words) about the Tantra AI project.
+
+Rules:
+- First person, conversational. Like you're talking to a colleague over coffee.
+- Pick ONE specific thing from the context — one moment, one failure, one win. Not a summary.
+- Short sentences. Vary their length.
+- No emojis, no bullet points, no headers.
+- No jargon: never use "leverage", "ecosystem", "synergy", "utilize", "paradigm",
+  "deep dive", "thought leadership", "exciting journey", "moving the needle".
+- No corporate phrases: "I'm thrilled to share", "proud to announce"
+- Be honest. If something was hard or broke, say that.
+- End with a plain observation, not a question or CTA.
+- Maximum 2 hashtags at the very end, or none.
+"""
+
+
+@app.task(bind=True, name="tantra.tasks.social.post_tantra_progress", queue="social")
+def post_tantra_progress(self) -> dict:
+    """
+    Generate a short, human-tone LinkedIn post about the Tantra AI build journey
+    and publish it directly via Zernio (no approval queue — immediate publish).
+
+    Runs every 5 minutes for testing. In production: set to once daily max.
+    Rate limit: checks Redis to avoid posting more than once per hour.
+    """
+    logger.info("Starting post_tantra_progress task")
+
+    from tantra.core.config import settings as _cfg
+
+    if not _cfg.zernio_enabled:
+        return {"success": False, "error": "Zernio not configured"}
+
+    # Rate limit: don't post more than once per hour (even if schedule is tighter)
+    try:
+        r = _get_redis_client()
+        if r.exists("tantra:progress_post:cooldown"):
+            logger.info("Progress post cooldown active — skipping this run")
+            return {"success": True, "skipped": True, "reason": "cooldown active (1h)"}
+    except Exception:
+        pass  # If Redis is down, proceed anyway
+
+    # Generate the post using LiteLLM worker tier (phi4:14b)
+    try:
+        post_text = _llm_generate(
+            prompt=(
+                "Write a LinkedIn post about the Tantra AI project.\n\n"
+                "Context:\n" + _TANTRA_BUILD_CONTEXT
+            ),
+            system=_HUMAN_POST_STYLE,
+            max_tokens=250,
+        )
+        post_text = post_text.strip().strip('"')
+        logger.info("Generated progress post (%d chars): %s...", len(post_text), post_text[:100])
+    except Exception as exc:
+        logger.error("LLM post generation failed: %s", exc)
+        return {"success": False, "error": f"LLM generation failed: {exc}"}
+
+    # Publish via Zernio
+    from tantra.tools.zernio_client import ZernioClient
+    try:
+        zernio = ZernioClient()
+        result = asyncio.run(
+            zernio.post_text(
+                content=post_text,
+                platform="linkedin",
+                account_id=_cfg.zernio_linkedin_account_id or None,
+            )
+        )
+    except Exception as exc:
+        return {"success": False, "error": f"Zernio publish failed: {exc}"}
+
+    if result.get("success"):
+        # Set 1-hour cooldown in Redis
+        try:
+            r = _get_redis_client()
+            r.setex("tantra:progress_post:cooldown", 3600, "1")
+        except Exception:
+            pass
+
+        urn = result.get("platform_post_id") or result.get("post_id", "")
+        logger.info("Progress post published: %s", urn)
+        return {
+            "success": True,
+            "post_urn": urn,
+            "post_text_preview": post_text[:200],
+        }
+    else:
+        return {"success": False, "error": result.get("error", "Unknown Zernio error")}
