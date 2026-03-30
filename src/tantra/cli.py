@@ -44,8 +44,16 @@ plugins_app = typer.Typer(
     rich_markup_mode="rich",
 )
 
+task_app = typer.Typer(
+    name="task",
+    help="Trigger and inspect Celery tasks",
+    add_completion=False,
+    rich_markup_mode="rich",
+)
+
 app.add_typer(skills_app, name="skills")
 app.add_typer(plugins_app, name="plugins")
+app.add_typer(task_app, name="task")
 
 console = Console()
 
@@ -501,6 +509,159 @@ def plugins_uninstall(
         console.print(f"[green]✓[/green] Uninstalled plugin [cyan]{name}[/cyan]")
     else:
         console.print(f"[yellow]Plugin not found (or it's a builtin):[/yellow] {name}")
+
+
+# ---------------------------------------------------------------------------
+# Task subcommands  —  tantra task <action>
+# ---------------------------------------------------------------------------
+
+def _resolve_task(name: str):
+    """
+    Resolve a short task name (e.g. 'research_and_draft_posts') or a full
+    dotted path (e.g. 'tantra.tasks.social.research_and_draft_posts') to the
+    registered Celery task object.  Returns (task, full_name) or (None, None).
+    """
+    from tantra.tasks.celery_app import app as celery_app
+
+    registered = celery_app.tasks
+
+    # Exact match first
+    if name in registered:
+        return registered[name], name
+
+    # Suffix match — find any registered task whose dotted name ends with '.<name>'
+    matches = [k for k in registered if k.endswith(f".{name}") and not k.startswith("celery.")]
+    if len(matches) == 1:
+        return registered[matches[0]], matches[0]
+    if len(matches) > 1:
+        return None, f"Ambiguous: {matches}"
+
+    return None, None
+
+
+@task_app.command("list")
+def task_list() -> None:
+    """List all registered Celery tasks (excluding built-in Celery internals)."""
+    from tantra.tasks.celery_app import app as celery_app
+
+    _banner()
+    tasks = sorted(
+        k for k in celery_app.tasks
+        if not k.startswith("celery.")
+    )
+
+    if not tasks:
+        console.print("[yellow]No tasks registered.[/yellow]")
+        raise typer.Exit(0)
+
+    table = Table(title="Registered Celery Tasks", show_header=True, show_lines=False)
+    table.add_column("Short name", style="cyan", no_wrap=True)
+    table.add_column("Full dotted path", style="dim")
+
+    for full in tasks:
+        short = full.rsplit(".", 1)[-1]
+        table.add_row(short, full)
+
+    console.print(table)
+    console.print(f"\n[dim]{len(tasks)} task(s) registered.[/dim]")
+    console.print(
+        "\n[dim]Run with:[/dim]  [cyan]tantra task run <short-name>[/cyan]"
+    )
+
+
+@task_app.command("run")
+def task_run(
+    name: str = typer.Argument(..., help="Task short name or full dotted path"),
+    wait: bool = typer.Option(False, "--wait", "-w", help="Block until task completes and print result"),
+    timeout: int = typer.Option(120, "--timeout", "-t", help="Seconds to wait (only with --wait)"),
+    kwargs_json: str = typer.Option("{}", "--kwargs", "-k", help="JSON kwargs to pass to the task"),
+) -> None:
+    """
+    Fire a registered Celery task.
+
+    Examples:\n
+      tantra task run research_and_draft_posts\n
+      tantra task run post_tantra_progress --wait\n
+      tantra task run publish_approved_linkedin_posts --wait --timeout 30
+    """
+    import json
+
+    _banner()
+
+    task, full_name = _resolve_task(name)
+    if task is None:
+        if full_name and full_name.startswith("Ambiguous"):
+            console.print(f"[red]Ambiguous task name:[/red] {full_name}")
+        else:
+            console.print(f"[red]Task not found:[/red] {name}")
+            console.print("[dim]Run [cyan]tantra task list[/cyan] to see available tasks.[/dim]")
+        raise typer.Exit(1)
+
+    try:
+        kw = json.loads(kwargs_json)
+    except json.JSONDecodeError as exc:
+        console.print(f"[red]Invalid --kwargs JSON:[/red] {exc}")
+        raise typer.Exit(1)
+
+    console.print(f"[cyan]Dispatching:[/cyan] {full_name}")
+    if kw:
+        console.print(f"[cyan]kwargs:[/cyan] {kw}")
+
+    result = task.delay(**kw)
+    console.print(f"[green]✓[/green] Queued  task_id=[cyan]{result.id}[/cyan]")
+
+    if not wait:
+        console.print(
+            f"\n[dim]Check status:[/dim]  [cyan]tantra task status {result.id}[/cyan]"
+        )
+        return
+
+    console.print(f"\n[dim]Waiting up to {timeout}s for result…[/dim]")
+    try:
+        with console.status("[cyan]Running...[/cyan]"):
+            value = result.get(timeout=timeout)
+        console.print(Panel(
+            str(value),
+            title="[green]Task Result[/green]",
+            border_style="green",
+        ))
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[red]Task failed or timed out:[/red] {exc}")
+        raise typer.Exit(1)
+
+
+@task_app.command("status")
+def task_status(
+    task_id: str = typer.Argument(..., help="Celery task UUID returned by 'tantra task run'"),
+) -> None:
+    """Check the current state and result of a dispatched task."""
+    from celery.result import AsyncResult
+    from tantra.tasks.celery_app import app as celery_app
+
+    _banner()
+    result = AsyncResult(task_id, app=celery_app)
+
+    state_colour = {
+        "PENDING": "yellow",
+        "STARTED": "cyan",
+        "SUCCESS": "green",
+        "FAILURE": "red",
+        "RETRY":   "yellow",
+        "REVOKED": "dim",
+    }
+    colour = state_colour.get(result.state, "white")
+
+    console.print(f"[cyan]Task ID:[/cyan]  {task_id}")
+    console.print(f"[cyan]State:[/cyan]    [{colour}]{result.state}[/{colour}]")
+
+    if result.state == "SUCCESS":
+        console.print(Panel(str(result.result), title="[green]Result[/green]", border_style="green"))
+    elif result.state == "FAILURE":
+        console.print(f"[red]Error:[/red] {result.result}")
+        if result.traceback:
+            console.print(Panel(result.traceback, title="Traceback", border_style="red"))
+    elif result.state == "PENDING":
+        console.print("[dim]Task is waiting in queue or result has expired.[/dim]")
 
 
 if __name__ == "__main__":
