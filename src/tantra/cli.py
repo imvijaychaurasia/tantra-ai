@@ -521,7 +521,17 @@ def _resolve_task(name: str):
     dotted path (e.g. 'tantra.tasks.social.research_and_draft_posts') to the
     registered Celery task object.  Returns (task, full_name) or (None, None).
     """
+    import importlib
     from tantra.tasks.celery_app import app as celery_app
+
+    # Celery's include= list is only auto-imported by worker processes.
+    # The CLI runs in the API container, so we eagerly import each included
+    # module here so their @app.task decorators register the tasks.
+    for module_path in celery_app.conf.include or []:
+        try:
+            importlib.import_module(module_path)
+        except Exception:  # noqa: BLE001
+            pass  # skip missing/broken modules gracefully
 
     registered = celery_app.tasks
 
