@@ -833,6 +833,18 @@ _TANTRA_STORY_ANGLES = [
     "Celery handles all the scheduled tasks — research at 7 AM, publish at 9 AM. "
     "Redis tracks what's been done so nothing runs twice. "
     "The whole thing runs quietly in the background while I'm at my day job.",
+
+    # angle-10  — Phase 1 complete, Phase 2 incoming (March 2026)
+    "Phase 1 of तंत्र is done. Ran the full pipeline today — typed one CLI command, "
+    "watched four agents run sequentially: research analyst picked a trending topic, "
+    "writer drafted 3 LinkedIn posts, YouTube scripter wrote a full video script, "
+    "analytics agent scored each one for engagement. Total time: 77 seconds. "
+    "Everything local. phi4:14b running on my own machine. No API key. No cloud bill. "
+    "Posts landed in Postgres, webhook fired to n8n for approval, one got published. "
+    "Watching a terminal scroll with agent outputs you didn't write is a strange feeling. "
+    "Phase 2 now: building a Director layer — an agent that plans the week, "
+    "decides what to create, and assigns work to the crew. "
+    "Right now I still make those decisions. That's the next thing to hand off.",
 ]
 
 _HUMAN_POST_STYLE = """
