@@ -33,7 +33,8 @@ app.config_from_object({
     # autodiscover_tasks() only works for packages (directories with tasks.py),
     # not for single-file modules like social_tasks.py — use include= instead.
     "include": [
-        "tantra.tasks.social_tasks",   # Phase 1: LinkedIn pipeline + engagement tasks
+        "tantra.tasks.social_tasks",    # Phase 1: LinkedIn pipeline + engagement tasks
+        "tantra.tasks.director_tasks",  # Phase 2: Director planning + task dispatch
     ],
 
     # Queues
@@ -110,6 +111,40 @@ app.conf.beat_schedule = {
         "schedule": crontab(hour=2, minute=0),
         "options": {"queue": "scheduled"},
     },
+
+    # ── Phase 2: Director planning engine ─────────────────────────────────────
+
+    # Step 1: Director plans the week — Monday 6AM (before research crew at 7AM)
+    # Creates WeeklyPlan + AgentTask rows; activates the plan for social tasks to read
+    "director-weekly-planning": {
+        "task": "tantra.tasks.director.weekly_planning",
+        "schedule": crontab(hour=6, minute=0, day_of_week="1"),
+        "options": {"queue": "agents"},
+    },
+
+    # Step 2: Dispatcher — checks AgentTasks due for execution every 30 minutes
+    # Picks up tasks whose scheduled_for <= now and fires execute_agent_task
+    "director-dispatch-due-tasks": {
+        "task": "tantra.tasks.director.dispatch_due_tasks",
+        "schedule": crontab(minute="*/30"),
+        "options": {"queue": "scheduled"},
+    },
+
+    # Step 3: CMO end-of-week content review — Friday 5PM
+    # Reviews published posts, extracts lessons, updates WeeklyPlan.performance_review
+    "director-cmo-review": {
+        "task": "tantra.tasks.director.cmo_review",
+        "schedule": crontab(hour=17, minute=0, day_of_week="5"),
+        "options": {"queue": "agents"},
+    },
+
+    # Step 4: CTO end-of-week technical review — Friday 5:15PM
+    # Reviews completed AgentTasks, generates build context for next week's posts
+    "director-cto-review": {
+        "task": "tantra.tasks.director.cto_review",
+        "schedule": crontab(hour=17, minute=15, day_of_week="5"),
+        "options": {"queue": "agents"},
+    },
 }
 
 
@@ -180,3 +215,43 @@ def generate_content_ideas(self: Celery) -> dict:
     """
     from tantra.tasks.social_tasks import research_and_draft_posts
     return research_and_draft_posts.delay().get(timeout=600)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Director Tasks
+# (full implementations live in director_tasks.py — registered via include=)
+# ---------------------------------------------------------------------------
+
+@app.task(bind=True, name="tantra.tasks.director.weekly_planning", queue="agents")
+def director_weekly_planning(self: Celery) -> dict:
+    """Director plans the week — Monday 6AM."""
+    from tantra.tasks.director_tasks import weekly_planning
+    return weekly_planning()
+
+
+@app.task(bind=True, name="tantra.tasks.director.dispatch_due_tasks", queue="scheduled")
+def director_dispatch_due_tasks(self: Celery) -> dict:
+    """Fire AgentTasks due for execution — every 30 min."""
+    from tantra.tasks.director_tasks import dispatch_due_tasks
+    return dispatch_due_tasks()
+
+
+@app.task(bind=True, name="tantra.tasks.director.cmo_review", queue="agents")
+def director_cmo_review(self: Celery) -> dict:
+    """CMO end-of-week content review — Friday 5PM."""
+    from tantra.tasks.director_tasks import cmo_review
+    return cmo_review()
+
+
+@app.task(bind=True, name="tantra.tasks.director.cto_review", queue="agents")
+def director_cto_review(self: Celery) -> dict:
+    """CTO end-of-week technical review — Friday 5:15PM."""
+    from tantra.tasks.director_tasks import cto_review
+    return cto_review()
+
+
+@app.task(bind=True, name="tantra.tasks.director.execute_agent_task", queue="agents")
+def director_execute_agent_task(self: Celery, task_id: str) -> dict:
+    """Execute a specific AgentTask by ID (dispatched by dispatch_due_tasks)."""
+    from tantra.tasks.director_tasks import execute_agent_task
+    return execute_agent_task(task_id)

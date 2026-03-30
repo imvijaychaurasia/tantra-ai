@@ -686,5 +686,259 @@ def task_status(
         console.print("[dim]Task is waiting in queue or result has expired.[/dim]")
 
 
+# ---------------------------------------------------------------------------
+# `tantra director` sub-commands  (Phase 2)
+# ---------------------------------------------------------------------------
+
+director_app = typer.Typer(
+    name="director",
+    help="Director planning engine — weekly plans, agent tasks, reviews",
+    add_completion=False,
+    rich_markup_mode="rich",
+)
+app.add_typer(director_app, name="director")
+
+
+@director_app.command("status")
+def director_status() -> None:
+    """Show the active weekly plan and all agent tasks."""
+    import json
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import sessionmaker
+    from tantra.core.config import settings
+    from tantra.tasks.celery_app import app as celery_app  # noqa: ensure tasks imported
+
+    _banner()
+
+    engine = create_engine(settings.database_sync_url, echo=False)
+    Session = sessionmaker(bind=engine)
+
+    with Session() as session:
+        try:
+            from tantra.db.director import AgentTask, WeeklyPlan
+        except ImportError as e:
+            console.print(f"[red]DB models not available:[/red] {e}")
+            raise typer.Exit(1)
+
+        plan = session.execute(
+            select(WeeklyPlan)
+            .where(WeeklyPlan.status == "active")
+            .order_by(WeeklyPlan.week_start.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+
+        if not plan:
+            console.print("[yellow]No active weekly plan.[/yellow]")
+            console.print("[dim]Run: tantra task run director_weekly_planning[/dim]")
+            return
+
+        goals = plan.goals or {}
+        console.print(Panel(
+            f"[bold]Week {plan.week_number}/{plan.year}[/bold]  —  "
+            f"starts {plan.week_start}\n\n"
+            f"[cyan]Primary topic:[/cyan] {goals.get('primary_topic', '?')}\n"
+            f"[cyan]LinkedIn target:[/cyan] {goals.get('linkedin_posts_target', '?')} posts  "
+            f"[cyan]Progress posts:[/cyan] {goals.get('progress_posts_target', '?')}\n\n"
+            f"[dim]{plan.director_analysis or 'No analysis yet.'}[/dim]",
+            title="[bold cyan]Active Weekly Plan[/bold cyan]",
+            border_style="cyan",
+        ))
+
+        tasks = session.execute(
+            select(AgentTask)
+            .where(AgentTask.plan_id == plan.id)
+            .order_by(AgentTask.scheduled_for.asc())
+        ).scalars().all()
+
+        if not tasks:
+            console.print("[dim]No agent tasks created yet.[/dim]")
+            return
+
+        table = Table(title="Agent Tasks", border_style="dim")
+        table.add_column("Type", style="cyan")
+        table.add_column("Assigned To", style="magenta")
+        table.add_column("Priority")
+        table.add_column("Scheduled")
+        table.add_column("Status")
+
+        status_colours = {
+            "pending": "yellow", "in_progress": "cyan",
+            "completed": "green", "failed": "red", "skipped": "dim",
+        }
+        for t in tasks:
+            colour = status_colours.get(t.status, "white")
+            table.add_row(
+                t.task_type,
+                t.assigned_to,
+                t.priority,
+                str(t.scheduled_for)[:16] if t.scheduled_for else "—",
+                f"[{colour}]{t.status}[/{colour}]",
+            )
+
+        console.print(table)
+
+        summary = {
+            "pending": sum(1 for t in tasks if t.status == "pending"),
+            "in_progress": sum(1 for t in tasks if t.status == "in_progress"),
+            "completed": sum(1 for t in tasks if t.status == "completed"),
+            "failed": sum(1 for t in tasks if t.status == "failed"),
+        }
+        console.print(
+            f"[dim]Total: {len(tasks)} tasks — "
+            f"pending: {summary['pending']}, "
+            f"in_progress: {summary['in_progress']}, "
+            f"completed: {summary['completed']}, "
+            f"failed: {summary['failed']}[/dim]"
+        )
+
+
+@director_app.command("plans")
+def director_plans(
+    limit: int = typer.Option(5, "--limit", "-n", help="Number of plans to show"),
+) -> None:
+    """List recent weekly plans."""
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import sessionmaker
+    from tantra.core.config import settings
+
+    _banner()
+
+    engine = create_engine(settings.database_sync_url, echo=False)
+    Session = sessionmaker(bind=engine)
+
+    with Session() as session:
+        try:
+            from tantra.db.director import WeeklyPlan
+        except ImportError as e:
+            console.print(f"[red]DB models not available:[/red] {e}")
+            raise typer.Exit(1)
+
+        plans = session.execute(
+            select(WeeklyPlan).order_by(WeeklyPlan.week_start.desc()).limit(limit)
+        ).scalars().all()
+
+        if not plans:
+            console.print("[yellow]No weekly plans found.[/yellow]")
+            return
+
+        table = Table(title="Weekly Plans", border_style="dim")
+        table.add_column("Week", style="cyan")
+        table.add_column("Year")
+        table.add_column("Status")
+        table.add_column("Primary Topic")
+        table.add_column("Created")
+
+        status_colours = {
+            "planning": "yellow", "active": "green",
+            "completed": "dim", "cancelled": "red",
+        }
+        for p in plans:
+            colour = status_colours.get(p.status, "white")
+            primary = (p.goals or {}).get("primary_topic", "—")[:50]
+            table.add_row(
+                f"Week {p.week_number} ({p.week_start})",
+                str(p.year),
+                f"[{colour}]{p.status}[/{colour}]",
+                primary,
+                str(p.created_at)[:16],
+            )
+
+        console.print(table)
+
+
+@director_app.command("plan")
+def director_plan(
+    wait: bool = typer.Option(True, "--wait/--no-wait", help="Wait for result"),
+    timeout: int = typer.Option(120, "--timeout", "-t", help="Seconds to wait"),
+) -> None:
+    """
+    Trigger the Director to plan this week now (manual run).
+    Equivalent to: tantra task run director_weekly_planning
+    """
+    from tantra.tasks.celery_app import app as celery_app
+    _load_all_task_modules()
+    _banner()
+
+    console.print("[cyan]Triggering weekly planning...[/cyan]")
+    result = celery_app.send_task("tantra.tasks.director.weekly_planning", queue="agents")
+    console.print(f"[dim]Celery task ID: {result.id}[/dim]")
+
+    if not wait:
+        console.print(f"[dim]Check status with: tantra task status {result.id}[/dim]")
+        return
+
+    console.print(f"[dim]Waiting up to {timeout}s...[/dim]")
+    try:
+        with console.status("[cyan]Director is planning...[/cyan]"):
+            value = result.get(timeout=timeout)
+        console.print(Panel(
+            str(value),
+            title="[green]Weekly Plan Created[/green]",
+            border_style="green",
+        ))
+        console.print("[dim]Run 'tantra director status' to see the full plan.[/dim]")
+    except Exception as exc:
+        console.print(f"[red]Planning failed or timed out:[/red] {exc}")
+        raise typer.Exit(1)
+
+
+@director_app.command("tasks")
+def director_tasks_list(
+    status_filter: Optional[str] = typer.Option(None, "--status", "-s", help="Filter: pending|in_progress|completed|failed"),
+    limit: int = typer.Option(20, "--limit", "-n"),
+) -> None:
+    """List agent tasks (all or filtered by status)."""
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import sessionmaker
+    from tantra.core.config import settings
+
+    _banner()
+
+    engine = create_engine(settings.database_sync_url, echo=False)
+    Session = sessionmaker(bind=engine)
+
+    with Session() as session:
+        try:
+            from tantra.db.director import AgentTask
+        except ImportError as e:
+            console.print(f"[red]DB models not available:[/red] {e}")
+            raise typer.Exit(1)
+
+        query = select(AgentTask).order_by(AgentTask.created_at.desc())
+        if status_filter:
+            query = query.where(AgentTask.status == status_filter)
+        query = query.limit(limit)
+        tasks = session.execute(query).scalars().all()
+
+        if not tasks:
+            console.print(f"[yellow]No tasks found{f' with status={status_filter!r}' if status_filter else ''}.[/yellow]")
+            return
+
+        table = Table(title="Agent Tasks", border_style="dim")
+        table.add_column("Type", style="cyan")
+        table.add_column("Assigned To")
+        table.add_column("Priority")
+        table.add_column("Status")
+        table.add_column("Scheduled")
+        table.add_column("ID", style="dim")
+
+        status_colours = {
+            "pending": "yellow", "in_progress": "cyan",
+            "completed": "green", "failed": "red", "skipped": "dim",
+        }
+        for t in tasks:
+            colour = status_colours.get(t.status, "white")
+            table.add_row(
+                t.task_type,
+                t.assigned_to,
+                t.priority,
+                f"[{colour}]{t.status}[/{colour}]",
+                str(t.scheduled_for)[:16] if t.scheduled_for else "—",
+                str(t.id)[:8],
+            )
+
+        console.print(table)
+
+
 if __name__ == "__main__":
     app()

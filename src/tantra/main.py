@@ -24,6 +24,7 @@ from tantra.core.database import close_db, init_db
 
 # Import all ORM models so Base.metadata.create_all creates every table
 import tantra.db  # noqa: F401  — registers User, OAuthAccount, SocialConnection, ContentQueueItem
+import tantra.db.director  # noqa: F401  — registers WeeklyPlan, AgentTask (Phase 2)
 
 # ---------------------------------------------------------------------------
 # Structured logging

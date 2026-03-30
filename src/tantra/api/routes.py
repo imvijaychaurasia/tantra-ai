@@ -741,3 +741,117 @@ async def hub_index() -> JSONResponse:
     if not index_path.exists():
         return JSONResponse({"skills": [], "plugins": []})
     return JSONResponse(json.loads(index_path.read_text()))
+
+
+# ---------------------------------------------------------------------------
+# Director API  (Phase 2)
+# ---------------------------------------------------------------------------
+
+@router.get("/director/status", tags=["director"])
+async def director_status(db: AsyncSession = Depends(get_db_dep)) -> JSONResponse:
+    """
+    Get the current Director status: active plan + this week's agent tasks.
+    """
+    from tantra.db.director import AgentTask, WeeklyPlan
+
+    plan_result = await db.execute(
+        select(WeeklyPlan)
+        .where(WeeklyPlan.status == "active")
+        .order_by(WeeklyPlan.week_start.desc())
+        .limit(1)
+    )
+    plan = plan_result.scalar_one_or_none()
+
+    if not plan:
+        return JSONResponse({
+            "status": "no_active_plan",
+            "message": "No active weekly plan. Run 'tantra task run director_weekly_planning' to create one.",
+        })
+
+    tasks_result = await db.execute(
+        select(AgentTask)
+        .where(AgentTask.plan_id == plan.id)
+        .order_by(AgentTask.scheduled_for.asc())
+    )
+    tasks = tasks_result.scalars().all()
+
+    return JSONResponse({
+        "plan": {
+            "id": str(plan.id),
+            "week_start": str(plan.week_start),
+            "week_number": plan.week_number,
+            "status": plan.status,
+            "goals": plan.goals,
+            "director_analysis": plan.director_analysis,
+            "activated_at": str(plan.activated_at) if plan.activated_at else None,
+        },
+        "tasks": [
+            {
+                "id": str(t.id),
+                "task_type": t.task_type,
+                "assigned_to": t.assigned_to,
+                "priority": t.priority,
+                "status": t.status,
+                "scheduled_for": str(t.scheduled_for) if t.scheduled_for else None,
+                "instructions": t.instructions,
+                "completed_at": str(t.completed_at) if t.completed_at else None,
+            }
+            for t in tasks
+        ],
+        "task_summary": {
+            "total": len(tasks),
+            "pending": sum(1 for t in tasks if t.status == "pending"),
+            "in_progress": sum(1 for t in tasks if t.status == "in_progress"),
+            "completed": sum(1 for t in tasks if t.status == "completed"),
+            "failed": sum(1 for t in tasks if t.status == "failed"),
+        },
+    })
+
+
+@router.get("/director/plans", tags=["director"])
+async def list_director_plans(
+    limit: int = Query(default=5, le=20),
+    db: AsyncSession = Depends(get_db_dep),
+) -> JSONResponse:
+    """List recent weekly plans."""
+    from tantra.db.director import WeeklyPlan
+
+    result = await db.execute(
+        select(WeeklyPlan)
+        .order_by(WeeklyPlan.week_start.desc())
+        .limit(limit)
+    )
+    plans = result.scalars().all()
+    return JSONResponse({
+        "plans": [
+            {
+                "id": str(p.id),
+                "week_start": str(p.week_start),
+                "week_number": p.week_number,
+                "year": p.year,
+                "status": p.status,
+                "goals_summary": {
+                    "primary_topic": (p.goals or {}).get("primary_topic"),
+                    "linkedin_target": (p.goals or {}).get("linkedin_posts_target"),
+                    "progress_target": (p.goals or {}).get("progress_posts_target"),
+                } if p.goals else None,
+                "created_at": str(p.created_at),
+            }
+            for p in plans
+        ]
+    })
+
+
+@router.post("/director/plan/trigger", tags=["director"])
+async def trigger_weekly_planning() -> JSONResponse:
+    """
+    Manually trigger the Director's weekly planning task (for testing).
+    Same as `tantra task run director_weekly_planning` from CLI.
+    """
+    from tantra.tasks.celery_app import director_weekly_planning
+    result = director_weekly_planning.delay()
+    return JSONResponse({
+        "success": True,
+        "celery_task_id": result.id,
+        "message": "Weekly planning task queued. Check /director/status after ~60s.",
+    })
