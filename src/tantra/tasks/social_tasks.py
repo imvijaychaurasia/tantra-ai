@@ -568,10 +568,19 @@ def _is_ai_post(text: str) -> bool:
 
 
 def _get_redis_client():
-    """Get a Redis client for deduplication state."""
+    """Get a Redis client for deduplication state.
+
+    IMPORTANT: uses Redis database 3 (not 0, 1, or 2).
+      DB 1 = Celery broker
+      DB 2 = Celery result backend
+      DB 3 = Tantra app state (cooldowns, seen-post dedup, angle counters)
+
+    When inspecting or clearing keys from the CLI always pass -n 3:
+        redis-cli -a <password> -n 3 KEYS "tantra:*"
+        redis-cli -a <password> -n 3 DEL tantra:progress_post:cooldown
+    """
     import redis
     from tantra.core.config import settings
-    # Redis URL is broker URL but database 0 (broker uses 1)
     redis_url = settings.celery_broker_url.replace("/1", "/3")
     return redis.from_url(redis_url, decode_responses=True)
 
