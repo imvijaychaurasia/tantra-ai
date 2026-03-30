@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import tempfile
 from datetime import datetime, timezone
@@ -30,7 +31,13 @@ logger = logging.getLogger(__name__)
 
 _REGISTRY_DIR = Path.home() / ".tantra" / "skills"
 _REGISTRY_INDEX = _REGISTRY_DIR / "registry.json"
-_BUILTIN_SKILLS_ROOT = Path(__file__).parents[4] / "skills"
+# Mirrors loader.py: parents[3] = repo root on host, /app on Docker.
+# Override with TANTRA_SKILLS_ROOT env var for any other layout.
+_BUILTIN_SKILLS_ROOT = (
+    Path(os.environ["TANTRA_SKILLS_ROOT"])
+    if "TANTRA_SKILLS_ROOT" in os.environ
+    else Path(__file__).parents[3] / "skills"
+)
 
 
 class SkillRegistry:

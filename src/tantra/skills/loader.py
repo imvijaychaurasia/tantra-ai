@@ -34,9 +34,26 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
-# Directories searched in precedence order (highest first)
-# User can extend via TANTRA_SKILL_DIRS env var (colon-separated paths)
-_BUILTIN_SKILLS_ROOT = Path(__file__).parents[4] / "skills"   # <repo>/skills/
+# ---------------------------------------------------------------------------
+# Skills directory resolution
+#
+# Path layout (source tree):  <repo>/src/tantra/skills/loader.py
+#   parents[0] = <repo>/src/tantra/skills/
+#   parents[1] = <repo>/src/tantra/
+#   parents[2] = <repo>/src/
+#   parents[3] = <repo>/           ← repo root on host (PYTHONPATH=src/)
+#
+# Inside Docker (PYTHONPATH=/app/src, skills bind-mounted at /app/skills/):
+#   /app/src/tantra/skills/loader.py
+#   parents[3] = /app/             → /app/skills/  ✓
+#
+# Override via env var TANTRA_SKILLS_ROOT for any other deployment layout.
+# ---------------------------------------------------------------------------
+_BUILTIN_SKILLS_ROOT = (
+    Path(os.environ["TANTRA_SKILLS_ROOT"])
+    if "TANTRA_SKILLS_ROOT" in os.environ
+    else Path(__file__).parents[3] / "skills"
+)
 _USER_SKILLS_DIR = Path.home() / ".tantra" / "skills"         # ~/.tantra/skills/
 _WORKSPACE_SKILLS_DIR = Path.cwd() / "skills"                  # ./skills/
 
