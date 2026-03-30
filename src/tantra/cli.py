@@ -515,23 +515,34 @@ def plugins_uninstall(
 # Task subcommands  —  tantra task <action>
 # ---------------------------------------------------------------------------
 
+def _load_all_task_modules() -> None:
+    """
+    Eagerly import every module listed in celery_app.conf.include.
+
+    Celery's include= setting is processed by worker processes on startup.
+    The CLI and API server are NOT workers, so included modules are never
+    imported automatically — tasks defined in those modules are invisible
+    to celery_app.tasks until we import them here.
+    """
+    import importlib
+    from tantra.tasks.celery_app import app as celery_app
+
+    for module_path in celery_app.conf.include or []:
+        try:
+            importlib.import_module(module_path)
+        except Exception:  # noqa: BLE001
+            pass  # skip broken modules gracefully (logged at debug level)
+
+
 def _resolve_task(name: str):
     """
     Resolve a short task name (e.g. 'research_and_draft_posts') or a full
     dotted path (e.g. 'tantra.tasks.social.research_and_draft_posts') to the
     registered Celery task object.  Returns (task, full_name) or (None, None).
     """
-    import importlib
     from tantra.tasks.celery_app import app as celery_app
 
-    # Celery's include= list is only auto-imported by worker processes.
-    # The CLI runs in the API container, so we eagerly import each included
-    # module here so their @app.task decorators register the tasks.
-    for module_path in celery_app.conf.include or []:
-        try:
-            importlib.import_module(module_path)
-        except Exception:  # noqa: BLE001
-            pass  # skip missing/broken modules gracefully
+    _load_all_task_modules()
 
     registered = celery_app.tasks
 
@@ -555,6 +566,7 @@ def task_list() -> None:
     from tantra.tasks.celery_app import app as celery_app
 
     _banner()
+    _load_all_task_modules()  # ensure included task modules are imported
     tasks = sorted(
         k for k in celery_app.tasks
         if not k.startswith("celery.")
