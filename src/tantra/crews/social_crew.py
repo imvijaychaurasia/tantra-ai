@@ -80,12 +80,23 @@ def search_youtube_trends(query: str) -> str:
 # Agent definitions
 # ---------------------------------------------------------------------------
 
-def build_social_media_crew(verbose: bool = True) -> Crew:
+def build_social_media_crew(
+    verbose: bool = True,
+    topic_hint: str = "",
+    director_guidance: str = "",
+) -> Crew:
     """
     Build and return the Social Media CrewAI crew.
 
     Sequential process: research → write_linkedin → write_youtube → analyse
     CMO agent lives in the Director planning crew (Phase 2) — not used here.
+
+    Args:
+        verbose:          Pass to CrewAI agents for debug output.
+        topic_hint:       Optional topic seed from the Director's weekly plan.
+                          Injected into the research task description.
+        director_guidance: Optional tone/style guidance from Director's goals.
+                           Appended to the content writer task description.
 
     Returns a Crew object ready to execute social media content tasks.
     """
@@ -159,17 +170,31 @@ def build_social_media_crew(verbose: bool = True) -> Crew:
     # Task definitions
     # ---------------------------------------------------------------------------
 
+    # Inject Director topic hint into research task if provided
+    topic_directive = (
+        f"\n\nDirector guidance: This week's primary topic is '{topic_hint}'. "
+        f"Prioritise research and content ideas around this theme."
+        if topic_hint else ""
+    )
+
     task_research = Task(
         description=(
             "Research the top 5 trending topics in AI, automation, and productivity "
             "on LinkedIn and YouTube this week. For each topic, note: "
             "1) Why it's trending, 2) Target audience, 3) Content angle that performs best."
+            + topic_directive
         ),
         expected_output=(
             "A structured research brief with 5 trending topics, each with audience "
             "profile, content angle, and 3 potential post hooks."
         ),
         agent=researcher,
+    )
+
+    # Inject Director tone/style guidance into writing task if provided
+    guidance_directive = (
+        f"\n\nTone guidance from Director: {director_guidance}"
+        if director_guidance else ""
     )
 
     task_write_linkedin = Task(
@@ -181,6 +206,7 @@ def build_social_media_crew(verbose: bool = True) -> Crew:
             "- End with an engaging question or CTA "
             "- Include 3-5 relevant hashtags "
             "Format clearly with labels: POST 1, POST 2, POST 3."
+            + guidance_directive
         ),
         expected_output=(
             "3 ready-to-publish LinkedIn posts, each labelled and formatted, "

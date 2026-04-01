@@ -302,7 +302,12 @@ def _trigger_n8n_approval(item_id: str, draft_text: str, hashtags: str) -> Optio
 # ---------------------------------------------------------------------------
 
 @app.task(bind=True, name="tantra.tasks.social.research_and_draft_posts", queue="agents")
-def research_and_draft_posts(self, platform: str = "linkedin") -> dict:
+def research_and_draft_posts(
+    self,
+    platform: str = "linkedin",
+    director_instructions: str = "",
+    director_context: dict = None,
+) -> dict:
     """
     Full content pipeline:
       1. Run the Social Media CrewAI crew (Researcher → ContentWriter)
@@ -313,14 +318,47 @@ def research_and_draft_posts(self, platform: str = "linkedin") -> dict:
 
     This task is CPU/IO heavy (~2-5 min with local models).
     Runs on the 'agents' queue.
+
+    Args:
+        platform:             Target platform (default: linkedin).
+        director_instructions: Optional override instructions from the Director's
+                               weekly plan (passed by execute_agent_task).
+        director_context:     Optional context dict from Director's weekly plan
+                              containing topic_hint, tone_override, etc.
     """
     logger.info("Starting research_and_draft_posts task")
 
-    # ── Step 1: Run the Social Crew ──────────────────────────────────────────
+    # ── Resolve Director context ─────────────────────────────────────────────
+    # If no explicit context passed, try to read the active weekly plan
     from tantra.crews.social_crew import build_social_media_crew
 
+    ctx = director_context or {}
+    if not ctx:
+        try:
+            from tantra.tasks.director_tasks import get_director_context
+            active_plan = get_director_context()
+            if active_plan:
+                goals = active_plan.get("goals", {})
+                ctx = {
+                    "topic_hint": goals.get("primary_topic", ""),
+                    "tone_override": goals.get("tone_guidance", ""),
+                }
+                logger.info(
+                    f"Director context loaded: topic={ctx.get('topic_hint')!r}"
+                )
+        except Exception as exc:
+            logger.debug(f"Director context unavailable (non-fatal): {exc}")
+
+    topic_hint = ctx.get("topic_hint", "")
+    director_guidance = director_instructions or ctx.get("tone_override", "")
+
+    # ── Step 1: Run the Social Crew ──────────────────────────────────────────
     try:
-        crew = build_social_media_crew(verbose=True)
+        crew = build_social_media_crew(
+            verbose=True,
+            topic_hint=topic_hint,
+            director_guidance=director_guidance,
+        )
         result = crew.kickoff()
         # CrewAI returns a CrewOutput object; get the string representation
         crew_output = str(result) if result else ""
@@ -881,13 +919,17 @@ _STORY_ANGLE_KEY = "tantra:progress_post:last_angle"
 
 
 @app.task(bind=True, name="tantra.tasks.social.post_tantra_progress", queue="social")
-def post_tantra_progress(self) -> dict:
+def post_tantra_progress(self, director_instructions: str = "") -> dict:
     """
     Generate a short, human-tone LinkedIn post about the Tantra AI build journey
     and publish it directly via Zernio (no approval queue — immediate publish).
 
     Runs every 5 minutes for testing. In production: set to once daily max.
     Rate limit: checks Redis to avoid posting more than once per hour.
+
+    Args:
+        director_instructions: Optional tone/focus guidance from the Director's
+                               weekly plan (passed by execute_agent_task).
     """
     logger.info("Starting post_tantra_progress task")
 
@@ -920,12 +962,20 @@ def post_tantra_progress(self) -> dict:
     post_style = _load_skill_instructions(
         "linkedin-human-post", fallback=_HUMAN_POST_STYLE
     )
+
+    # Optionally append Director's tone guidance to the prompt
+    director_note = (
+        f"\n\nDirector guidance for this post: {director_instructions}"
+        if director_instructions else ""
+    )
+
     try:
         post_text = _llm_generate(
             prompt=(
                 "Write a LinkedIn post about this specific moment from the Tantra AI build:\n\n"
                 f"{angle_text}\n\n"
                 "Use only this angle. Do not mix in other topics."
+                + director_note
             ),
             system=post_style,
             max_tokens=250,
