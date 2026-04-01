@@ -8,10 +8,15 @@ Task queues:
 """
 from __future__ import annotations
 
+import logging
+
 from celery import Celery
 from celery.schedules import crontab
+from celery.signals import worker_ready
 
 from tantra.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # App initialisation
@@ -146,6 +151,38 @@ app.conf.beat_schedule = {
         "options": {"queue": "agents"},
     },
 }
+
+
+# ---------------------------------------------------------------------------
+# Worker startup — ensure all DB tables exist
+# ---------------------------------------------------------------------------
+
+@worker_ready.connect
+def on_worker_ready(**kwargs) -> None:
+    """
+    Ensure all DB tables exist when the Celery worker starts.
+
+    The FastAPI app calls init_db() (async create_all) on startup, but the
+    Celery worker boots independently and may start before the API — or be
+    restarted without an API restart.  This handler uses a sync SQLAlchemy
+    engine to guarantee every ORM-registered table exists before the first
+    task runs.
+
+    This is safe to call repeatedly — create_all() is idempotent (it only
+    creates tables that don't already exist).
+    """
+    try:
+        from sqlalchemy import create_engine
+        from tantra.core.database import Base
+        import tantra.db          # registers Phase 1 models (ContentQueueItem, User, …)
+        import tantra.db.director # registers Phase 2 models (WeeklyPlan, AgentTask)
+
+        engine = create_engine(settings.database_sync_url, echo=False)
+        Base.metadata.create_all(engine)
+        engine.dispose()
+        logger.info("Worker DB tables ensured (create_all idempotent)")
+    except Exception as exc:
+        logger.warning(f"Worker DB init failed (non-fatal — API may have already created tables): {exc}")
 
 
 # ---------------------------------------------------------------------------

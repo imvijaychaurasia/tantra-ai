@@ -424,13 +424,27 @@ class DirectorAgent(LeaderAgent):
 # ---------------------------------------------------------------------------
 
 def _extract_json(text: str) -> Any:
-    """Extract the first JSON object or array from an LLM response string."""
+    """
+    Extract the first JSON object or array from an LLM response string.
+
+    Tries multiple strategies in order:
+    1. Standard json.loads()  — handles clean JSON
+    2. ast.literal_eval()     — handles Python-dict output (single quotes, True/False/None)
+    3. Single-quote swap       — simple heuristic for trivial single-quote cases
+
+    The LLM (especially local models via LiteLLM) sometimes returns Python-dict
+    style responses with single-quoted keys/values.  ast.literal_eval() handles
+    these correctly because Python booleans (True/False/None) are also valid.
+    """
+    import ast
+
     text = text.strip()
     # Strip markdown fences
     if "```json" in text:
         text = text.split("```json")[1].split("```")[0].strip()
     elif "```" in text:
         text = text.split("```")[1].split("```")[0].strip()
+
     # Find first { or [
     start = -1
     for i, ch in enumerate(text):
@@ -438,8 +452,35 @@ def _extract_json(text: str) -> Any:
             start = i
             break
     if start == -1:
-        raise ValueError("No JSON found in response")
-    return json.loads(text[start:])
+        raise ValueError("No JSON found in LLM response")
+
+    json_str = text[start:]
+
+    # Strategy 1: standard JSON
+    try:
+        return json.loads(json_str)
+    except json.JSONDecodeError:
+        pass
+
+    # Strategy 2: Python literal (single-quoted keys/values, True/False/None)
+    try:
+        result = ast.literal_eval(json_str)
+        if isinstance(result, (dict, list)):
+            return result
+    except Exception:
+        pass
+
+    # Strategy 3: naive single-quote → double-quote swap (last resort)
+    try:
+        fixed = json_str.replace("'", '"')
+        return json.loads(fixed)
+    except Exception:
+        pass
+
+    raise ValueError(
+        f"Could not parse JSON from LLM response — "
+        f"first 300 chars: {json_str[:300]!r}"
+    )
 
 
 def _format_performance(perf: PerformanceSummary) -> str:
