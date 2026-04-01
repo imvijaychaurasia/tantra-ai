@@ -199,27 +199,71 @@ def status() -> None:
     _banner()
     console.print("\n[cyan]Service Status[/cyan]\n")
 
-    services = {
-        "Tantra API": f"http://localhost:8000/health",
-        "LiteLLM Proxy": f"{settings.litellm_base_url}/health",
-        "Ollama": "http://localhost:11434/api/tags",
-        "Qdrant": "http://localhost:6333/healthz",
-        "Open WebUI": "http://localhost:3000",
-        "n8n": "http://localhost:5678",
-    }
+    # Each entry: (display_name, browser_url, internal_check_url)
+    # CLI runs inside the tantra-api container — must use Docker service names
+    # for inter-container HTTP.  Browser URLs (localhost:PORT) are shown to the
+    # user but are NOT reachable from inside the container.
+    services = [
+        (
+            "Tantra API",
+            "http://localhost:8000",
+            "http://localhost:8000/health",        # self — localhost OK
+        ),
+        (
+            "LiteLLM Proxy",
+            "http://localhost:4000",
+            "http://litellm:4000/health/liveliness",  # no auth required
+        ),
+        (
+            "Ollama",
+            "http://localhost:11434",
+            "http://ollama:11434/api/tags",
+        ),
+        (
+            "Qdrant",
+            "http://localhost:6333",
+            "http://qdrant:6333/healthz",
+        ),
+        (
+            "Open WebUI",
+            "http://localhost:3000",
+            "http://open-webui:8080/health",       # internal port is 8080
+        ),
+        (
+            "n8n",
+            "http://localhost:5678",
+            "http://n8n:5678",
+        ),
+        (
+            "Flower",
+            "http://localhost:5555",
+            "http://flower:5555",
+        ),
+        (
+            "Terminal (ttyd)",
+            "http://localhost:7681",
+            "http://ttyd:7681",
+        ),
+    ]
 
     table = Table(show_header=True)
     table.add_column("Service", style="cyan")
-    table.add_column("URL", style="dim")
+    table.add_column("Browser URL", style="dim")
     table.add_column("Status", justify="center")
 
-    for name, url in services.items():
+    for name, browser_url, check_url in services:
         try:
-            resp = httpx.get(url, timeout=3)
-            status_str = "[green]● UP[/green]" if resp.status_code < 400 else f"[yellow]● {resp.status_code}[/yellow]"
+            resp = httpx.get(check_url, timeout=3)
+            if resp.status_code < 400:
+                status_str = "[green]● UP[/green]"
+            elif resp.status_code == 401:
+                # Auth required but service is alive
+                status_str = "[green]● UP[/green] [dim](auth)[/dim]"
+            else:
+                status_str = f"[yellow]● {resp.status_code}[/yellow]"
         except Exception:
             status_str = "[red]● DOWN[/red]"
-        table.add_row(name, url, status_str)
+        table.add_row(name, browser_url, status_str)
 
     console.print(table)
     console.print()
