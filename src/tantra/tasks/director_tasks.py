@@ -31,17 +31,25 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _run(coro):
-    """Run an async coroutine from sync Celery task context."""
-    try:
-        loop = asyncio.get_event_loop()
-        if loop.is_closed():
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-        return loop.run_until_complete(coro)
-    except RuntimeError:
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        return loop.run_until_complete(coro)
+    """
+    Run an async coroutine from a sync Celery task context.
+
+    Uses asyncio.run() which always creates a fresh event loop, runs the
+    coroutine to completion, and closes the loop cleanly.  This is safer than
+    get_event_loop().run_until_complete() in Celery ForkPoolWorker processes
+    where a previously-used loop can be left in a dirty state.
+
+    IMPORTANT: do NOT call _run() twice in the same function — reuse the same
+    event loop by grouping all coroutines into a single async wrapper:
+
+        async def _pipeline():
+            a = await coro_one()
+            b = await coro_two(a)
+            return a, b
+
+        result_a, result_b = _run(_pipeline())  # ← one call only
+    """
+    return asyncio.run(coro)
 
 
 def _make_session():
@@ -397,13 +405,26 @@ def _get_celery_app() -> Celery:
 # Task: weekly_planning  (Monday 6AM)
 # ---------------------------------------------------------------------------
 
+async def _weekly_planning_pipeline(director, week_start, perf):
+    """
+    Single async pipeline for weekly planning — both LLM calls in one event loop.
+
+    Grouping plan_week() + decompose_to_tasks() into one asyncio.run() call
+    prevents event loop state issues in Celery ForkPoolWorker processes.
+    """
+    from tantra.agents.director import PerformanceSummary
+    plan_data = await director.plan_week(week_start=week_start, performance=perf)
+    agent_tasks_data = await director.decompose_to_tasks(plan_data)
+    return plan_data, agent_tasks_data
+
+
 def weekly_planning() -> dict:
     """
     Director plans the week:
     1. Pull last week's performance from DB
-    2. Run DirectorAgent.plan_week() via LLM
-    3. Decompose plan into AgentTasks
-    4. Persist to DB and activate the plan
+    2. Run DirectorAgent.plan_week() + decompose_to_tasks() in one event loop
+    3. Persist WeeklyPlan + AgentTask rows to DB
+    4. Activate the plan (status = 'active')
 
     Registered as: tantra.tasks.director.weekly_planning
     Queue: agents
@@ -416,20 +437,21 @@ def weekly_planning() -> dict:
         today = date.today()
         week_start = today - timedelta(days=today.weekday())
 
-        # Gather last week's performance
+        # Gather last week's performance (sync DB query)
         perf_data = _get_last_weeks_performance()
 
         from tantra.agents.director import DirectorAgent, PerformanceSummary
         director = DirectorAgent()
         perf = PerformanceSummary(**perf_data)
 
-        # Run planning LLM
-        plan_data = _run(director.plan_week(week_start=week_start, performance=perf))
+        # Run both LLM calls in a SINGLE asyncio.run() to avoid event loop
+        # state issues in Celery ForkPoolWorker (two sequential _run() calls
+        # leave the loop dirty — the second one hangs silently).
+        plan_data, agent_tasks_data = _run(
+            _weekly_planning_pipeline(director, week_start, perf)
+        )
 
-        # Decompose into agent tasks
-        agent_tasks_data = _run(director.decompose_to_tasks(plan_data))
-
-        # Persist to DB
+        # Persist to DB (sync)
         plan_id = _save_weekly_plan(plan_data, agent_tasks_data)
 
         # Activate the new plan
