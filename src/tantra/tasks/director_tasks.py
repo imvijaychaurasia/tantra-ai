@@ -151,6 +151,20 @@ def _save_weekly_plan(plan_data, agent_tasks_data: list[dict]) -> str:
             existing.director_analysis = plan_data.director_analysis
             existing.updated_at = datetime.utcnow()
             plan_id = existing.id
+
+            # Purge stale pending/in_progress tasks before inserting the new set.
+            # Only remove tasks that haven't started yet — leave completed/failed
+            # tasks as historical record.  This prevents duplicate task rows when
+            # weekly_planning is re-run for the same week (e.g. manual trigger,
+            # fallback plan replaced by real LLM plan, or beat schedule retry).
+            from sqlalchemy import delete as sa_delete
+            session.execute(
+                sa_delete(AgentTask).where(
+                    AgentTask.plan_id == plan_id,
+                    AgentTask.status.in_(["pending", "in_progress"]),
+                )
+            )
+            session.flush()
         else:
             plan = WeeklyPlan(
                 id=uuid.uuid4(),
