@@ -2,16 +2,31 @@
 Tantra AI — Director Celery Tasks (Phase 2)
 
 Task registry:
-  tantra.tasks.director.weekly_planning      — Monday 6AM: Director plans the week
-  tantra.tasks.director.cmo_review           — Friday 5PM: CMO reviews content performance
-  tantra.tasks.director.cto_review           — Friday 5PM: CTO reviews technical progress
-  tantra.tasks.director.execute_agent_task   — Execute a specific AgentTask by ID
-  tantra.tasks.director.dispatch_due_tasks   — Every 30 min: fire tasks that are due
+  tantra.tasks.director.weekly_planning        — Monday 6AM: Director plans the week
+  tantra.tasks.director.cmo_review             — Friday 5PM: CMO reviews content performance
+  tantra.tasks.director.cto_review             — Friday 5PM: CTO reviews technical progress
+  tantra.tasks.director.execute_agent_task     — Execute a specific AgentTask by ID
+  tantra.tasks.director.dispatch_due_tasks     — Every 30 min: fire tasks that are due
+  tantra.tasks.director.recover_stuck_tasks    — Every 15 min + on worker startup: reset
+                                                 in_progress tasks that exceeded their
+                                                 time budget (crash/restart recovery)
 
 Integration with Phase 1:
   social_tasks.py reads the active WeeklyPlan via _get_director_context() helper
   at the start of research_and_draft_posts + post_tantra_progress. If a plan
   exists, the task uses plan goals/calendar as guidance. If not, defaults apply.
+
+Resilience design:
+  Every AgentTask goes through the state machine:
+    pending → in_progress → completed | failed | skipped
+
+  If a Celery worker crashes while a task is in_progress, the task stays stuck.
+  recover_stuck_tasks() scans for tasks exceeding their type-specific time budget
+  and resets them to pending so dispatch_due_tasks picks them up again.
+
+  For the expensive research_draft crew (~20 min), a Redis checkpoint stores the
+  crew output so a restarted task can skip the LLM crew and resume at Step 2
+  (post parsing → DB insert → n8n webhook).
 """
 from __future__ import annotations
 
@@ -60,6 +75,109 @@ def _make_session():
     engine = create_engine(settings.database_sync_url, echo=False)
     Session = sessionmaker(bind=engine)
     return Session()
+
+
+# ---------------------------------------------------------------------------
+# Resilience: stuck-task time budgets per task_type
+# ---------------------------------------------------------------------------
+
+# How long an in_progress task can run before it's declared stuck.
+# Tuned to be generous (2× expected runtime) so normal long runs aren't killed.
+# research_draft runs the full 4-agent crew; allow 45 min before declaring stuck.
+_STUCK_THRESHOLDS: dict[str, timedelta] = {
+    "research_draft":   timedelta(minutes=45),  # crew can take 15-20 min locally
+    "progress_post":    timedelta(minutes=15),   # LLM gen + Zernio API
+    "analytics_review": timedelta(minutes=25),   # CMO crew
+    "youtube_script":   timedelta(minutes=20),   # script generation
+    "engagement_scan":  timedelta(minutes=12),   # feed scan + comment gen
+}
+_DEFAULT_STUCK_THRESHOLD = timedelta(minutes=30)
+
+
+# ---------------------------------------------------------------------------
+# recover_stuck_agent_tasks — called on worker startup + every 15 min
+# ---------------------------------------------------------------------------
+
+def recover_stuck_agent_tasks() -> dict:
+    """
+    Scan for AgentTasks stuck in 'in_progress' due to a worker crash or restart,
+    and reset them to 'pending' so dispatch_due_tasks picks them up again.
+
+    A task is "stuck" when it has been in_progress longer than its type-specific
+    time budget (_STUCK_THRESHOLDS).  On reset, scheduled_for is set to now so
+    the task is immediately eligible for the next dispatch_due_tasks tick.
+
+    Called by:
+      - @worker_ready signal (on every Celery worker startup)
+      - tantra.tasks.director.recover_stuck_tasks beat (every 15 min)
+      - tantra director recover CLI command
+
+    Returns a summary dict with the list of recovered task IDs.
+    """
+    from sqlalchemy import select
+    from tantra.db.director import AgentTask
+
+    logger.info("recover_stuck_agent_tasks: scanning for stuck in-progress tasks")
+    now = datetime.utcnow()
+    session = _make_session()
+    try:
+        stuck_candidates = session.execute(
+            select(AgentTask).where(AgentTask.status == "in_progress")
+        ).scalars().all()
+
+        recovered = []
+        for task in stuck_candidates:
+            threshold = _STUCK_THRESHOLDS.get(task.task_type, _DEFAULT_STUCK_THRESHOLD)
+            # Use started_at if available; fall back to created_at as upper bound
+            reference_time = task.started_at or task.created_at
+            if reference_time and (now - reference_time) > threshold:
+                task.status = "pending"
+                task.started_at = None
+                task.completed_at = None
+                # Keep the original result/error_message fields as diagnostic breadcrumb
+                task.error_message = (
+                    f"[auto-recovered] Worker crash or restart detected. "
+                    f"Task was in_progress since {reference_time.isoformat()} "
+                    f"({int((now - reference_time).total_seconds() / 60)} min). "
+                    f"Re-queued for immediate dispatch."
+                )
+                # Push scheduled_for to now so dispatch picks it up next tick
+                task.scheduled_for = now
+                recovered.append({
+                    "id": str(task.id),
+                    "task_type": task.task_type,
+                    "stuck_since": reference_time.isoformat(),
+                    "stuck_for_minutes": int((now - reference_time).total_seconds() / 60),
+                })
+                logger.warning(
+                    "Recovered stuck AgentTask %s (%s) — "
+                    "in_progress since %s (%d min)",
+                    task.id, task.task_type, reference_time,
+                    int((now - reference_time).total_seconds() / 60),
+                )
+
+        if recovered:
+            session.commit()
+            logger.info(
+                "recover_stuck_agent_tasks: reset %d stuck task(s) to pending",
+                len(recovered),
+            )
+        else:
+            logger.debug("recover_stuck_agent_tasks: no stuck tasks found")
+
+        return {
+            "success": True,
+            "scanned": len(stuck_candidates),
+            "recovered_count": len(recovered),
+            "recovered_tasks": recovered,
+        }
+
+    except Exception as exc:
+        session.rollback()
+        logger.error("recover_stuck_agent_tasks failed: %s", exc)
+        return {"success": False, "error": str(exc)}
+    finally:
+        session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -625,11 +743,18 @@ def execute_agent_task(task_id: str) -> dict:
         # Dispatch to the appropriate Phase 1 task
         result = _dispatch_task_type(task_type, instructions, context)
 
+        # Treat "skipped due to cooldown" as completed, not failed.
+        # post_tantra_progress returns success=True + skipped=True when the
+        # beat schedule already published in the same 24h window.
+        skipped = result.get("skipped", False)
+        final_status = "completed" if (result.get("success") or skipped) else "failed"
+        error_msg = None if (result.get("success") or skipped) else result.get("error")
+
         _update_agent_task_status(
             task_id,
-            "completed" if result.get("success") else "failed",
+            final_status,
             result=result,
-            error=result.get("error"),
+            error=error_msg,
         )
         return {"success": result.get("success", False), "task_id": task_id, "result": result}
 

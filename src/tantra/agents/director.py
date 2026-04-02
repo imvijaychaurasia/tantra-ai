@@ -361,8 +361,29 @@ class DirectorAgent(LeaderAgent):
                 "status": "pending",
             })
 
-        logger.info(f"Director decomposed {len(tasks)} agent tasks from plan")
-        return tasks
+        # Deduplicate: if the LLM creates two tasks of the same type at the same
+        # time slot (hallucination artifact), keep only the higher-priority one.
+        # This prevents double-dispatching the same task type at the same moment.
+        _priority_rank = {"high": 0, "medium": 1, "low": 2}
+        seen: dict[tuple, dict] = {}
+        for t in tasks:
+            key = (t["task_type"], t["scheduled_for"])
+            if key not in seen:
+                seen[key] = t
+            else:
+                # Keep whichever has higher priority; ties go to the first seen
+                if _priority_rank.get(t["priority"], 1) < _priority_rank.get(seen[key]["priority"], 1):
+                    seen[key] = t
+        deduplicated = list(seen.values())
+
+        if len(deduplicated) < len(tasks):
+            logger.warning(
+                f"Director task deduplication: {len(tasks)} → {len(deduplicated)} tasks "
+                f"(removed {len(tasks) - len(deduplicated)} duplicate slot(s))"
+            )
+
+        logger.info(f"Director decomposed {len(deduplicated)} agent tasks from plan")
+        return deduplicated
 
     async def review_week(
         self,

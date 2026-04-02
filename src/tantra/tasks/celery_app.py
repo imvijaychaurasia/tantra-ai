@@ -53,7 +53,19 @@ app.config_from_object({
     # Worker behaviour
     "worker_prefetch_multiplier": 1,    # Fair dispatch for long tasks
     "task_acks_late": True,             # Ack only after task completes
-    "task_reject_on_worker_lost": True,
+    "task_reject_on_worker_lost": True, # Re-queue task if worker is killed
+
+    # ── Global task time limits (override per-task with soft/time_limit) ──────
+    # Prevents zombie tasks from blocking a worker slot indefinitely.
+    # research_and_draft_posts and execute_agent_task set higher per-task limits.
+    # These globals are the safety net for any task that doesn't declare its own.
+    "task_soft_time_limit": 35 * 60,   # 35 min: raises SoftTimeLimitExceeded
+    "task_time_limit":      40 * 60,   # 40 min: SIGKILL (hard limit)
+
+    # Worker max tasks — recycle process after N tasks to prevent memory leaks
+    # in long-running CrewAI / LLM workers.  Each worker process handles up to
+    # 50 tasks then is replaced by a fresh child process.
+    "worker_max_tasks_per_child": 50,
 
     # Timezone
     "timezone": settings.timezone,
@@ -150,6 +162,17 @@ app.conf.beat_schedule = {
         "schedule": crontab(hour=17, minute=15, day_of_week="5"),
         "options": {"queue": "agents"},
     },
+
+    # ── Resilience: stuck-task recovery ───────────────────────────────────────
+    # Runs every 15 minutes to detect AgentTasks stuck in 'in_progress' state
+    # after a worker crash or unplanned restart.  Resets them to 'pending' so
+    # dispatch_due_tasks picks them up at the next 30-minute tick.
+    # Also fires once on every worker startup via the @worker_ready signal.
+    "director-recover-stuck-tasks": {
+        "task": "tantra.tasks.director.recover_stuck_tasks",
+        "schedule": crontab(minute="*/15"),
+        "options": {"queue": "scheduled"},
+    },
 }
 
 
@@ -160,17 +183,20 @@ app.conf.beat_schedule = {
 @worker_ready.connect
 def on_worker_ready(**kwargs) -> None:
     """
-    Ensure all DB tables exist when the Celery worker starts.
+    Run startup housekeeping every time a Celery worker process comes online.
 
-    The FastAPI app calls init_db() (async create_all) on startup, but the
-    Celery worker boots independently and may start before the API — or be
-    restarted without an API restart.  This handler uses a sync SQLAlchemy
-    engine to guarantee every ORM-registered table exists before the first
-    task runs.
+    1. DB table creation — idempotent create_all() ensures all ORM-registered
+       tables exist whether this worker started before or after the FastAPI app.
 
-    This is safe to call repeatedly — create_all() is idempotent (it only
-    creates tables that don't already exist).
+    2. Stuck-task recovery — scan for AgentTasks left in 'in_progress' from a
+       previous crash/restart and reset them to 'pending'.  This runs inline
+       (synchronously) so the worker is in a clean state before it accepts any
+       new tasks from the queue.
+
+    Both operations are non-fatal: a failure here is logged but does not
+    prevent the worker from starting.
     """
+    # ── 1. Ensure DB tables ────────────────────────────────────────────────
     try:
         from sqlalchemy import create_engine
         from tantra.core.database import Base
@@ -180,9 +206,28 @@ def on_worker_ready(**kwargs) -> None:
         engine = create_engine(settings.database_sync_url, echo=False)
         Base.metadata.create_all(engine)
         engine.dispose()
-        logger.info("Worker DB tables ensured (create_all idempotent)")
+        logger.info("Worker startup: DB tables ensured (create_all idempotent)")
     except Exception as exc:
-        logger.warning(f"Worker DB init failed (non-fatal — API may have already created tables): {exc}")
+        logger.warning(
+            f"Worker startup: DB table init failed (non-fatal): {exc}"
+        )
+
+    # ── 2. Recover stuck in-progress tasks from previous crash ────────────
+    try:
+        from tantra.tasks.director_tasks import recover_stuck_agent_tasks
+        result = recover_stuck_agent_tasks()
+        if result.get("recovered_count", 0) > 0:
+            logger.warning(
+                "Worker startup: recovered %d stuck AgentTask(s) from previous crash: %s",
+                result["recovered_count"],
+                [t["task_type"] for t in result.get("recovered_tasks", [])],
+            )
+        else:
+            logger.info("Worker startup: no stuck tasks found (clean state)")
+    except Exception as exc:
+        logger.warning(
+            f"Worker startup: stuck-task recovery failed (non-fatal): {exc}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -292,3 +337,24 @@ def director_execute_agent_task(self: Celery, task_id: str) -> dict:
     """Execute a specific AgentTask by ID (dispatched by dispatch_due_tasks)."""
     from tantra.tasks.director_tasks import execute_agent_task
     return execute_agent_task(task_id)
+
+
+@app.task(
+    bind=True,
+    name="tantra.tasks.director.recover_stuck_tasks",
+    queue="scheduled",
+    # Recovery is a fast DB scan — hard limit of 2 min is generous
+    soft_time_limit=90,
+    time_limit=120,
+)
+def director_recover_stuck_tasks(self: Celery) -> dict:
+    """
+    Scan for AgentTasks stuck in 'in_progress' and reset to 'pending'.
+
+    Runs every 15 min via beat and once on worker startup via @worker_ready.
+    This is the scheduled counterpart to the inline startup recovery — it
+    catches tasks that get stuck between worker restarts (e.g. worker OOM
+    killed during a long crew run but then immediately restarted by Docker).
+    """
+    from tantra.tasks.director_tasks import recover_stuck_agent_tasks
+    return recover_stuck_agent_tasks()

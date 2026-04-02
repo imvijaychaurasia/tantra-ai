@@ -261,6 +261,11 @@ services:
       --loglevel=${CELERY_LOG_LEVEL:-info}
       --concurrency=${CELERY_CONCURRENCY:-4}
       --queues=default,social,agents,scheduled
+    # Graceful shutdown: SIGTERM triggers Celery's warm shutdown, which lets
+    # in-flight tasks finish (up to task_time_limit=40 min) before Docker
+    # sends SIGKILL.  120s here covers the Celery shutdown handshake itself.
+    stop_signal: SIGTERM
+    stop_grace_period: 120s
     networks:
       tantra-net:
         ipv4_address: 172.28.0.21
@@ -281,13 +286,22 @@ services:
     volumes:
       - ./src:/app/src:ro
       - ./skills:/app/skills:ro
+    # CRITICAL: Beat must load .env so it has DB, Zernio, LiteLLM, and all
+    # other credentials available when it fires scheduled tasks.
+    env_file: .env
     environment:
       PYTHONPATH: /app/src
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-tantra}:${POSTGRES_PASSWORD:-tantra_secret}@postgres:5432/${POSTGRES_DB:-tantra}
+      DATABASE_SYNC_URL: postgresql://${POSTGRES_USER:-tantra}:${POSTGRES_PASSWORD:-tantra_secret}@postgres:5432/${POSTGRES_DB:-tantra}
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-tantra_redis_secret}@redis:6379/1
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-tantra_redis_secret}@redis:6379/2
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-tantra-master-key}
     command: >
       celery -A tantra.tasks.celery_app beat
       --loglevel=${CELERY_LOG_LEVEL:-info}
+    # Beat is stateless (just fires tasks into the broker) — 30s is generous
+    stop_grace_period: 30s
     networks:
       tantra-net:
         ipv4_address: 172.28.0.22

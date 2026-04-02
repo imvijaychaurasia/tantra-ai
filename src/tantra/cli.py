@@ -809,6 +809,7 @@ def director_status() -> None:
             "pending": "yellow", "in_progress": "cyan",
             "completed": "green", "failed": "red", "skipped": "dim",
         }
+        failed_tasks = []
         for t in tasks:
             colour = status_colours.get(t.status, "white")
             table.add_row(
@@ -818,6 +819,8 @@ def director_status() -> None:
                 str(t.scheduled_for)[:16] if t.scheduled_for else "—",
                 f"[{colour}]{t.status}[/{colour}]",
             )
+            if t.status == "failed":
+                failed_tasks.append(t)
 
         console.print(table)
 
@@ -834,6 +837,215 @@ def director_status() -> None:
             f"completed: {summary['completed']}, "
             f"failed: {summary['failed']}[/dim]"
         )
+
+        # Show error details for failed tasks
+        if failed_tasks:
+            console.print()
+            console.print("[bold red]Failed Task Errors:[/bold red]")
+            for t in failed_tasks:
+                err = t.error_message or "(no error message stored)"
+                console.print(
+                    f"  [cyan]{t.task_type}[/cyan] "
+                    f"({str(t.scheduled_for)[:16] if t.scheduled_for else '?'}) "
+                    f"[dim]id={str(t.id)[:8]}[/dim]"
+                )
+                console.print(f"    [red]→ {err[:200]}[/red]")
+            console.print(
+                "\n[dim]To retry all failed tasks: "
+                "[cyan]tantra director retry-failed[/cyan][/dim]"
+            )
+
+
+@director_app.command("retry-failed")
+def director_retry_failed(
+    task_type_filter: Optional[str] = typer.Option(
+        None, "--type", "-t",
+        help="Only retry tasks of this type (e.g. progress_post, research_draft)"
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="Preview what would be retried without changing DB"),
+) -> None:
+    """Reset all failed agent tasks to 'pending' so dispatch_due_tasks picks them up again."""
+    from datetime import datetime
+    from sqlalchemy import create_engine, select, update
+    from sqlalchemy.orm import sessionmaker
+    from tantra.core.config import settings
+
+    _banner()
+
+    engine = create_engine(settings.database_sync_url, echo=False)
+    Session = sessionmaker(bind=engine)
+
+    with Session() as session:
+        try:
+            from tantra.db.director import AgentTask, WeeklyPlan
+        except ImportError as e:
+            console.print(f"[red]DB models not available:[/red] {e}")
+            raise typer.Exit(1)
+
+        # Get the active plan
+        plan = session.execute(
+            select(WeeklyPlan)
+            .where(WeeklyPlan.status == "active")
+            .order_by(WeeklyPlan.week_start.desc())
+            .limit(1)
+        ).scalar_one_or_none()
+
+        if not plan:
+            console.print("[yellow]No active weekly plan.[/yellow]")
+            raise typer.Exit(0)
+
+        # Find failed tasks
+        query = (
+            select(AgentTask)
+            .where(AgentTask.plan_id == plan.id, AgentTask.status == "failed")
+            .order_by(AgentTask.scheduled_for.asc())
+        )
+        if task_type_filter:
+            query = query.where(AgentTask.task_type == task_type_filter)
+
+        failed = session.execute(query).scalars().all()
+
+        if not failed:
+            console.print("[green]No failed tasks to retry.[/green]")
+            raise typer.Exit(0)
+
+        console.print(f"[yellow]Found {len(failed)} failed task(s):[/yellow]")
+        for t in failed:
+            err = t.error_message or "(no error stored)"
+            console.print(
+                f"  [cyan]{t.task_type}[/cyan] "
+                f"scheduled={str(t.scheduled_for)[:16] if t.scheduled_for else '?'}  "
+                f"[dim]error: {err[:100]}[/dim]"
+            )
+
+        if dry_run:
+            console.print("\n[dim]Dry run — no changes made. Remove --dry-run to retry.[/dim]")
+            raise typer.Exit(0)
+
+        # Reset to pending with scheduled_for = now (immediate dispatch)
+        now = datetime.utcnow()
+        count = 0
+        for t in failed:
+            t.status = "pending"
+            t.error_message = None
+            t.result = None
+            t.started_at = None
+            t.completed_at = None
+            # Push scheduled_for to now so dispatch_due_tasks picks it up immediately
+            t.scheduled_for = now
+            count += 1
+
+        session.commit()
+        console.print(
+            f"\n[green]✓[/green] Reset [cyan]{count}[/cyan] task(s) to pending "
+            f"(scheduled for now — will dispatch at next beat tick within 30 min).\n"
+            "[dim]Force immediate dispatch:[/dim]  "
+            "[cyan]tantra task run director_dispatch_due_tasks --wait[/cyan]"
+        )
+
+
+@director_app.command("errors")
+def director_errors(
+    limit: int = typer.Option(10, "--limit", "-n", help="Max tasks to show"),
+) -> None:
+    """Show detailed error information for all failed agent tasks."""
+    from sqlalchemy import create_engine, select
+    from sqlalchemy.orm import sessionmaker
+    from tantra.core.config import settings
+
+    _banner()
+
+    engine = create_engine(settings.database_sync_url, echo=False)
+    Session = sessionmaker(bind=engine)
+
+    with Session() as session:
+        try:
+            from tantra.db.director import AgentTask
+        except ImportError as e:
+            console.print(f"[red]DB models not available:[/red] {e}")
+            raise typer.Exit(1)
+
+        failed = session.execute(
+            select(AgentTask)
+            .where(AgentTask.status == "failed")
+            .order_by(AgentTask.completed_at.desc().nulls_last())
+            .limit(limit)
+        ).scalars().all()
+
+        if not failed:
+            console.print("[green]No failed tasks found.[/green]")
+            return
+
+        for t in failed:
+            err = t.error_message or "(no error message stored)"
+            result_str = str(t.result or {})
+            console.print(Panel(
+                f"[bold]{t.task_type}[/bold]  assigned_to=[cyan]{t.assigned_to}[/cyan]  "
+                f"priority={t.priority}\n"
+                f"[dim]ID: {t.id}[/dim]\n"
+                f"Scheduled: {str(t.scheduled_for)[:19] if t.scheduled_for else '—'}  "
+                f"Failed at: {str(t.completed_at)[:19] if t.completed_at else '—'}\n\n"
+                f"[red]Error:[/red] {err}\n\n"
+                f"[dim]Result payload: {result_str[:300]}[/dim]",
+                border_style="red",
+                title=f"[red]FAILED[/red]",
+            ))
+
+        console.print(
+            f"\n[dim]{len(failed)} failed task(s) shown. "
+            "Run [cyan]tantra director retry-failed[/cyan] to reset them.[/dim]"
+        )
+
+
+@director_app.command("recover")
+def director_recover() -> None:
+    """
+    Recover stuck in-progress agent tasks after an unplanned worker crash or restart.
+
+    Scans all AgentTasks in 'in_progress' state. Any task that has exceeded its
+    type-specific time budget is reset to 'pending' so dispatch_due_tasks picks
+    it up again at the next beat tick (within 30 min) or immediately with:
+
+      tantra task run director_dispatch_due_tasks --wait
+
+    This command runs the same logic as the automatic 15-min beat schedule and
+    the @worker_ready startup hook — useful for immediate manual recovery.
+    """
+    _banner()
+
+    console.print("[cyan]Scanning for stuck in-progress agent tasks...[/cyan]\n")
+
+    try:
+        from tantra.tasks.director_tasks import recover_stuck_agent_tasks
+        result = recover_stuck_agent_tasks()
+    except Exception as exc:
+        console.print(f"[red]Recovery scan failed:[/red] {exc}")
+        raise typer.Exit(1)
+
+    scanned = result.get("scanned", 0)
+    recovered = result.get("recovered_tasks", [])
+    count = result.get("recovered_count", 0)
+
+    console.print(f"[dim]Scanned {scanned} in-progress task(s).[/dim]")
+
+    if not recovered:
+        console.print("[green]✓[/green] No stuck tasks found — all in-progress tasks are within their time budget.")
+        return
+
+    console.print(f"[yellow]⚠[/yellow]  Recovered [cyan]{count}[/cyan] stuck task(s):\n")
+    for t in recovered:
+        console.print(
+            f"  [cyan]{t['task_type']}[/cyan]  "
+            f"stuck since {t['stuck_since'][:19]}  "
+            f"({t['stuck_for_minutes']} min)  "
+            f"[dim]id={t['id'][:8]}[/dim]"
+        )
+
+    console.print(
+        f"\n[green]✓[/green] Reset to pending. "
+        "Will dispatch within 30 min, or force now:\n"
+        "[dim]  [cyan]tantra task run director_dispatch_due_tasks --wait[/cyan][/dim]"
+    )
 
 
 @director_app.command("plans")

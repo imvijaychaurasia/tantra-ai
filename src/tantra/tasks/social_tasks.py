@@ -15,6 +15,16 @@ Tasks:
 
 Both tasks use sync DB access via SQLAlchemy (sync engine + asyncio bridge).
 Celery workers are synchronous, so we run async helpers in asyncio.run().
+
+Resilience (restart / crash recovery):
+  research_and_draft_posts checkpoints its most expensive step — the 4-agent
+  CrewAI run (~15-20 min) — to Redis after completion.  If the worker restarts
+  before Step 3 (DB insert), it reuses the cached crew output rather than
+  re-running the full crew.  Checkpoint TTL is 4 hours (same calendar day only).
+
+  post_tantra_progress is already idempotent via the 24h Redis cooldown key.
+  publish_approved_linkedin_posts is re-entrant because approved items stay in
+  the DB until explicitly marked published/failed.
 """
 from __future__ import annotations
 
@@ -352,27 +362,43 @@ def research_and_draft_posts(
     topic_hint = ctx.get("topic_hint", "")
     director_guidance = director_instructions or ctx.get("tone_override", "")
 
-    # ── Step 1: Run the Social Crew ──────────────────────────────────────────
-    try:
-        crew = build_social_media_crew(
-            verbose=True,
-            topic_hint=topic_hint,
-            director_guidance=director_guidance,
-        )
-        result = crew.kickoff()
-        # CrewAI returns a CrewOutput object; get the string representation
-        crew_output = str(result) if result else ""
-        logger.info(f"Social crew completed. Output length: {len(crew_output)} chars")
-    except Exception as exc:
-        logger.error(f"Social crew failed: {exc}", exc_info=True)
-        return {"success": False, "error": str(exc), "items_created": 0}
+    # ── Step 1: Run the Social Crew (with restart-recovery checkpoint) ────────
+    # The checkpoint allows a restarted worker to skip the expensive 4-agent
+    # CrewAI run if it already completed in the same calendar day.
+    ckpt_key = _research_checkpoint_key(topic_hint, platform)
+    result = None  # CrewAI result object (None if loaded from checkpoint)
+
+    crew_output = _load_research_checkpoint(ckpt_key)
+    if crew_output:
+        # Checkpoint hit — skip crew, jump to parsing with cached output
+        restored_from_checkpoint = True
+    else:
+        restored_from_checkpoint = False
+        try:
+            crew = build_social_media_crew(
+                verbose=True,
+                topic_hint=topic_hint,
+                director_guidance=director_guidance,
+            )
+            result = crew.kickoff()
+            # CrewAI returns a CrewOutput object; get the string representation
+            crew_output = str(result) if result else ""
+            logger.info(f"Social crew completed. Output length: {len(crew_output)} chars")
+            # ── Persist checkpoint immediately after crew completes ────────────
+            # This ensures that even if Step 3 (DB insert) fails or the worker
+            # restarts, we can reuse this output without re-running the crew.
+            _save_research_checkpoint(ckpt_key, crew_output)
+        except Exception as exc:
+            logger.error(f"Social crew failed: {exc}", exc_info=True)
+            return {"success": False, "error": str(exc), "items_created": 0}
 
     # ── Step 2: Find the LinkedIn posts in the crew output ───────────────────
     # Sequential crew task order: [0] research, [1] write_linkedin, [2] write_youtube, [3] analyse
     # tasks_output[1] is the content writer's LinkedIn posts.
+    # When restored from checkpoint, result is None so we fall back to full output.
     linkedin_post_text_raw = ""
     try:
-        if hasattr(result, "tasks_output") and len(result.tasks_output) >= 2:
+        if result is not None and hasattr(result, "tasks_output") and len(result.tasks_output) >= 2:
             raw1 = result.tasks_output[1]
             # CrewAI TaskOutput: .raw is the string content, fallback to str()
             linkedin_post_text_raw = getattr(raw1, "raw", None) or str(raw1)
@@ -419,10 +445,19 @@ def research_and_draft_posts(
         except Exception as exc:
             logger.error(f"Failed to create content item: {exc}", exc_info=True)
 
+    # ── Clear checkpoint after all drafts are safely in DB ───────────────────
+    # Once the items are persisted, there's no need to keep the checkpoint.
+    # Clearing it allows the next planned research run (same day, different topic)
+    # to start fresh rather than reusing today's research output.
+    if created_items:
+        _delete_research_checkpoint(ckpt_key)
+        logger.debug("Research checkpoint cleared after successful DB insert.")
+
     return {
         "success": True,
         "items_created": len(created_items),
         "items": created_items,
+        "restored_from_checkpoint": restored_from_checkpoint,
     }
 
 
@@ -621,6 +656,80 @@ def _get_redis_client():
     from tantra.core.config import settings
     redis_url = settings.celery_broker_url.replace("/1", "/3")
     return redis.from_url(redis_url, decode_responses=True)
+
+
+# ---------------------------------------------------------------------------
+# Research crew checkpoint — survive worker restarts mid-research
+# ---------------------------------------------------------------------------
+
+# TTL for the research checkpoint (4 hours — same-day reuse only).
+# Long enough to survive a container restart; short enough to never reuse
+# stale research from a previous day or planning cycle.
+_RESEARCH_CHECKPOINT_TTL = 4 * 3600
+_RESEARCH_CHECKPOINT_PREFIX = "tantra:research_ckpt:"
+
+
+def _research_checkpoint_key(topic_hint: str, platform: str) -> str:
+    """
+    Build a Redis key that is unique per (date, topic_hint, platform).
+    Using a hash of the topic_hint so keys stay short and Redis-safe.
+    """
+    import hashlib
+    date_tag = datetime.utcnow().strftime("%Y-%m-%d")
+    hint_hash = hashlib.md5(
+        f"{topic_hint}|{platform}".encode()
+    ).hexdigest()[:10]
+    return f"{_RESEARCH_CHECKPOINT_PREFIX}{date_tag}:{hint_hash}"
+
+
+def _load_research_checkpoint(key: str) -> Optional[str]:
+    """
+    Return the cached crew output string from Redis, or None if not found.
+    A return value of None means the full crew run is needed.
+    """
+    try:
+        r = _get_redis_client()
+        value = r.get(key)
+        if value:
+            logger.info(
+                "Research checkpoint HIT (%s) — reusing cached crew output "
+                "(%d chars). Skipping crew run (restart recovery).",
+                key, len(value),
+            )
+            return value
+    except Exception as exc:
+        logger.debug("Research checkpoint load failed (non-fatal): %s", exc)
+    return None
+
+
+def _save_research_checkpoint(key: str, crew_output: str) -> None:
+    """
+    Save crew output to Redis with a 4-hour TTL.
+    Called immediately after the crew completes so subsequent restarts
+    can skip the expensive LLM crew and jump to parsing/DB insert.
+    """
+    try:
+        r = _get_redis_client()
+        r.setex(key, _RESEARCH_CHECKPOINT_TTL, crew_output)
+        logger.info(
+            "Research checkpoint saved (%s) — %d chars, TTL=%ds",
+            key, len(crew_output), _RESEARCH_CHECKPOINT_TTL,
+        )
+    except Exception as exc:
+        logger.warning("Research checkpoint save failed (non-fatal): %s", exc)
+
+
+def _delete_research_checkpoint(key: str) -> None:
+    """
+    Delete the checkpoint after all posts are successfully inserted.
+    Prevents the same checkpoint from being used across different Director plan
+    cycles that happen to share the same date + topic.
+    """
+    try:
+        r = _get_redis_client()
+        r.delete(key)
+    except Exception:
+        pass
 
 
 def _already_commented(post_id: str) -> bool:
@@ -937,6 +1046,44 @@ def post_tantra_progress(self, director_instructions: str = "") -> dict:
 
     if not _cfg.zernio_enabled:
         return {"success": False, "error": "Zernio not configured"}
+
+    # Beat-vs-Director deference: if called directly by the beat schedule
+    # (director_instructions is empty) AND a Director AgentTask for today's
+    # progress_post is pending, skip the beat run and let the Director own it.
+    # This prevents double-scheduling and keeps Director as single source of truth.
+    if not director_instructions:
+        try:
+            from datetime import date, timedelta
+            from sqlalchemy import create_engine, select
+            from sqlalchemy.orm import sessionmaker
+            from tantra.core.config import settings as _settings
+            from tantra.db.director import AgentTask, WeeklyPlan
+
+            _engine = create_engine(_settings.database_sync_url, echo=False)
+            _S = sessionmaker(bind=_engine)
+            with _S() as _sess:
+                _today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+                _today_end = _today_start + timedelta(days=1)
+                _director_task = _sess.execute(
+                    select(AgentTask).where(
+                        AgentTask.task_type == "progress_post",
+                        AgentTask.status.in_(["pending", "in_progress"]),
+                        AgentTask.scheduled_for >= _today_start,
+                        AgentTask.scheduled_for < _today_end,
+                    ).limit(1)
+                ).scalar_one_or_none()
+                if _director_task is not None:
+                    logger.info(
+                        "Beat run deferred: Director has a progress_post task pending for today "
+                        "(task_id=%s). Director will publish instead.", _director_task.id
+                    )
+                    return {
+                        "success": True,
+                        "skipped": True,
+                        "reason": "deferred to Director scheduled task",
+                    }
+        except Exception as _exc:
+            logger.debug("Beat-Director deference check failed (non-fatal): %s", _exc)
 
     # Rate limit: don't post more than once per day (production cadence guard)
     try:
