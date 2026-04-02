@@ -764,36 +764,66 @@ def execute_agent_task(task_id: str) -> dict:
         return {"success": False, "task_id": task_id, "error": str(exc)}
 
 
-def _dispatch_task_type(task_type: str, instructions: str, context: dict) -> dict:
-    """Map a task_type string to the actual Celery task and execute it."""
-    app = _get_celery_app()
+def _eager_call(er) -> dict:
+    """
+    Safely extract the return value from a Celery EagerResult (produced by task.apply()).
 
+    NEVER use er.get() here — calling result.get() inside a running Celery task raises:
+      RuntimeError: Never call result.get() within a task!
+      https://docs.celeryq.dev/en/latest/userguide/tasks.html#avoid-launching-synchronous-subtasks
+
+    .apply() executes the task in-process synchronously and stores the return value
+    (or exception) in er.result.  We read that directly — no broker involved, no
+    deadlock risk, no forbidden .get() call.
+    """
+    if er.failed():
+        # er.result holds the raised exception instance on failure
+        return {"success": False, "error": str(er.result)}
+    result = er.result
+    if isinstance(result, dict):
+        return result
+    # Unexpected return type — treat as success with no extra metadata
+    return {"success": True}
+
+
+def _dispatch_task_type(task_type: str, instructions: str, context: dict) -> dict:
+    """
+    Map a task_type string to the actual Phase 1 task function and run it
+    in-process via task.apply() (eager/synchronous execution).
+
+    DESIGN NOTE — why not .delay() / .apply_async() + .get()?
+    execute_agent_task is already running inside a Celery worker.  Dispatching
+    a subtask via the broker and blocking on its result is the exact anti-pattern
+    Celery forbids ("Never call result.get() within a task!").  task.apply()
+    runs the function synchronously in the current process, then _eager_call()
+    reads .result directly — no round-trip, no deadlock, no forbidden .get().
+    """
     if task_type == "research_draft":
         from tantra.tasks.social_tasks import research_and_draft_posts
-        result = research_and_draft_posts.apply(
+        er = research_and_draft_posts.apply(
             kwargs={"director_instructions": instructions, "director_context": context}
         )
-        return result.get(timeout=600) if hasattr(result, "get") else {"success": True}
+        return _eager_call(er)
 
     elif task_type == "progress_post":
         from tantra.tasks.social_tasks import post_tantra_progress
-        result = post_tantra_progress.apply(
+        er = post_tantra_progress.apply(
             kwargs={"director_instructions": instructions}
         )
-        return result.get(timeout=120) if hasattr(result, "get") else {"success": True}
+        return _eager_call(er)
 
     elif task_type == "youtube_script":
-        from tantra.tasks.celery_app import youtube_analytics_pull
-        result = youtube_analytics_pull.apply()
-        return result.get(timeout=120) if hasattr(result, "get") else {"success": True}
+        from tantra.tasks.social_tasks import youtube_analytics_pull
+        er = youtube_analytics_pull.apply()
+        return _eager_call(er)
 
     elif task_type == "analytics_review":
         return cmo_review()
 
     elif task_type == "engagement_scan":
         from tantra.tasks.social_tasks import linkedin_engage_feed
-        result = linkedin_engage_feed.apply()
-        return result.get(timeout=120) if hasattr(result, "get") else {"success": True}
+        er = linkedin_engage_feed.apply()
+        return _eager_call(er)
 
     else:
         logger.warning(f"Unknown task_type: {task_type!r} — skipping")
