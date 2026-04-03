@@ -163,6 +163,7 @@ def generate_youtube_script(agent_task_id: str) -> dict[str, Any]:
                 channel_context=channel_context,
                 recent_video_titles=recent_titles,
                 verbose=True,
+                agent_task_id=agent_task_id,
             )
 
             crew_result = crew.kickoff()
@@ -238,6 +239,16 @@ def generate_youtube_script(agent_task_id: str) -> dict[str, Any]:
         _clear_script_checkpoint(agent_task_id)
         logger.info("generate_youtube_script: completed, video_id=%s", video_id)
 
+        try:
+            from tantra.core.monitor import MonitorEmitter
+            MonitorEmitter.task_end(
+                "youtube_script", agent_task_id,
+                video_id=video_id, title=video.title,
+                scenes=len(script_data.get("scenes", [])),
+            )
+        except Exception:
+            pass
+
         return {
             "success": True,
             "youtube_video_id": video_id,
@@ -248,6 +259,11 @@ def generate_youtube_script(agent_task_id: str) -> dict[str, Any]:
 
     except Exception as exc:
         logger.error("generate_youtube_script failed: %s", exc, exc_info=True)
+        try:
+            from tantra.core.monitor import MonitorEmitter
+            MonitorEmitter.task_failed("youtube_script", agent_task_id, str(exc))
+        except Exception:
+            pass
         try:
             task_obj = session.get(AgentTask, uuid.UUID(agent_task_id))
             if task_obj:

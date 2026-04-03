@@ -122,6 +122,7 @@ def build_youtube_crew(
     channel_context: str = "",
     recent_video_titles: Optional[list[str]] = None,
     verbose: bool = True,
+    agent_task_id: str = "",
 ) -> Crew:
     """
     Build and return the YouTube script-generation CrewAI crew.
@@ -342,12 +343,22 @@ def build_youtube_crew(
         context=[task_write_script, task_seo],
     )
 
+    # Live monitor: publish each agent step / tool call to Redis pub/sub
+    try:
+        from tantra.core.monitor import make_crew_step_callback, MonitorEmitter
+        _step_cb = make_crew_step_callback("YouTubeCrew", agent_task_id)
+        MonitorEmitter.task_start("youtube_script", agent_task_id,
+                                  topic=topic_hint[:80], crew="YouTubeCrew")
+    except Exception:
+        _step_cb = None
+
     return Crew(
         agents=[researcher, script_writer, seo_optimizer, quality_reviewer],
         tasks=[task_research, task_write_script, task_seo, task_review],
         process=Process.sequential,
         verbose=verbose,
         memory=False,
+        step_callback=_step_cb,
     )
 
 

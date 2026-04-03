@@ -31,7 +31,7 @@ from datetime import datetime, timedelta
 from typing import Any, Optional
 
 import httpx
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
@@ -1039,3 +1039,232 @@ async def reject_youtube_script(
         "rejected_by": body.rejected_by,
         "message": "Script rejected. Commission a new youtube_script task via Director chat to retry.",
     })
+
+
+# ---------------------------------------------------------------------------
+# Live Monitor — WebSocket + HTML dashboard
+# ---------------------------------------------------------------------------
+
+_MONITOR_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tantra AI — Live Monitor</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { background: #0d0d0d; color: #c9d1d9; font-family: 'JetBrains Mono', 'Fira Code', monospace; font-size: 13px; }
+  header { background: #161b22; border-bottom: 1px solid #30363d; padding: 12px 20px; display: flex; align-items: center; gap: 16px; position: sticky; top: 0; z-index: 10; }
+  header h1 { font-size: 15px; color: #58a6ff; letter-spacing: 0.05em; }
+  #status { font-size: 11px; padding: 3px 10px; border-radius: 20px; background: #21262d; color: #8b949e; }
+  #status.connected { background: #1f4a27; color: #3fb950; }
+  #status.disconnected { background: #4a1f1f; color: #f85149; }
+  .stats { margin-left: auto; display: flex; gap: 20px; font-size: 11px; color: #8b949e; }
+  .stat { display: flex; flex-direction: column; align-items: center; gap: 2px; }
+  .stat span { font-size: 16px; font-weight: bold; color: #c9d1d9; }
+  .filters { background: #161b22; border-bottom: 1px solid #30363d; padding: 8px 20px; display: flex; gap: 12px; align-items: center; }
+  .filters label { display: flex; align-items: center; gap: 6px; cursor: pointer; font-size: 11px; padding: 4px 10px; border-radius: 4px; border: 1px solid #30363d; transition: background 0.15s; }
+  .filters label:hover { background: #21262d; }
+  .filter-llm { color: #79c0ff; }
+  .filter-agent { color: #d2a8ff; }
+  .filter-tool { color: #ffa657; }
+  .filter-task { color: #3fb950; }
+  .filter-system { color: #8b949e; }
+  #log { padding: 8px 0; overflow-y: auto; height: calc(100vh - 100px); }
+  .entry { display: flex; gap: 10px; padding: 5px 20px; border-bottom: 1px solid #161b22; animation: fadeIn 0.15s ease; }
+  .entry:hover { background: #161b22; }
+  @keyframes fadeIn { from { opacity: 0; transform: translateY(-3px); } to { opacity: 1; transform: none; } }
+  .ts { color: #484f58; flex-shrink: 0; width: 90px; }
+  .badge { flex-shrink: 0; width: 110px; text-align: center; border-radius: 4px; padding: 1px 6px; font-size: 10px; font-weight: bold; letter-spacing: 0.05em; }
+  .badge-llm_start    { background: #1c2d4a; color: #79c0ff; }
+  .badge-llm_end      { background: #1c2d4a; color: #79c0ff; }
+  .badge-llm_failed   { background: #4a1f1f; color: #f85149; }
+  .badge-agent_step   { background: #2d1f4a; color: #d2a8ff; }
+  .badge-tool_call    { background: #3d2a1a; color: #ffa657; }
+  .badge-task_start   { background: #1a3d1a; color: #3fb950; }
+  .badge-task_end     { background: #1a3d1a; color: #3fb950; }
+  .badge-task_failed  { background: #4a1f1f; color: #f85149; }
+  .badge-system       { background: #21262d; color: #8b949e; }
+  .body { flex: 1; overflow: hidden; }
+  .body .main { color: #e6edf3; }
+  .body .meta { color: #8b949e; font-size: 11px; margin-top: 2px; }
+  .body .model { color: #79c0ff; }
+  .body .agent { color: #d2a8ff; }
+  .body .tool { color: #ffa657; }
+  .body .latency { color: #3fb950; }
+  .body .error { color: #f85149; }
+  #empty { text-align: center; color: #484f58; padding: 60px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>⬡ तंत्र — Live Monitor</h1>
+  <div id="status">Connecting…</div>
+  <div class="stats">
+    <div class="stat"><span id="s-total">0</span>events</div>
+    <div class="stat"><span id="s-llm">0</span>LLM calls</div>
+    <div class="stat"><span id="s-tokens">0</span>tokens</div>
+    <div class="stat"><span id="s-lat">—</span>avg ms</div>
+  </div>
+</header>
+<div class="filters">
+  <span style="color:#8b949e;font-size:11px;margin-right:6px">Filter:</span>
+  <label class="filter-llm"><input type="checkbox" id="f-llm" checked> LLM calls</label>
+  <label class="filter-agent"><input type="checkbox" id="f-agent" checked> Agent steps</label>
+  <label class="filter-tool"><input type="checkbox" id="f-tool" checked> Tool calls</label>
+  <label class="filter-task"><input type="checkbox" id="f-task" checked> Tasks</label>
+  <label class="filter-system"><input type="checkbox" id="f-system" checked> System</label>
+  <button onclick="document.getElementById('log').innerHTML='<div id=empty>Cleared.</div>';stats={total:0,llm:0,tokens:0,latencies:[]};updateStats();" style="margin-left:auto;background:#21262d;color:#8b949e;border:1px solid #30363d;border-radius:4px;padding:4px 12px;cursor:pointer;font-size:11px;">Clear</button>
+</div>
+<div id="log"><div id="empty" style="text-align:center;color:#484f58;padding:60px">Waiting for events…<br><small>Start a task or crew to see live activity</small></div></div>
+
+<script>
+const WS_URL = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/api/v1/ws/monitor';
+let stats = { total: 0, llm: 0, tokens: 0, latencies: [] };
+let autoScroll = true;
+
+function updateStats() {
+  document.getElementById('s-total').textContent = stats.total;
+  document.getElementById('s-llm').textContent = stats.llm;
+  document.getElementById('s-tokens').textContent = stats.tokens > 999 ? (stats.tokens/1000).toFixed(1)+'k' : stats.tokens;
+  document.getElementById('s-lat').textContent = stats.latencies.length
+    ? Math.round(stats.latencies.slice(-50).reduce((a,b)=>a+b,0)/Math.min(50,stats.latencies.length))+'ms' : '—';
+}
+
+function fmtTime(ts) {
+  try { return new Date(ts).toLocaleTimeString('en-GB',{hour12:false,hour:'2-digit',minute:'2-digit',second:'2-digit'}); }
+  catch { return ts.slice(11,19) || '??:??:??'; }
+}
+
+function escHtml(s) {
+  return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+function renderEvent(d) {
+  const ev = d.event || 'system';
+  const filterMap = {
+    llm_start:'f-llm', llm_end:'f-llm', llm_failed:'f-llm',
+    agent_step:'f-agent', tool_call:'f-tool',
+    task_start:'f-task', task_end:'f-task', task_failed:'f-task',
+    system:'f-system'
+  };
+  const fid = filterMap[ev] || 'f-system';
+  if (!document.getElementById(fid)?.checked) return;
+
+  let main = '', meta = '';
+  if (ev === 'llm_start') {
+    main = `<span class="model">${escHtml(d.model)}</span> — ${escHtml(d.messages_count)} messages`;
+    meta = `agent: <span class="agent">${escHtml(d.agent)}</span>  crew: ${escHtml(d.crew||'—')}`;
+  } else if (ev === 'llm_end') {
+    main = `<span class="model">${escHtml(d.model)}</span> → <span class="latency">${d.latency_ms}ms</span>  ${d.total_tokens||0} tokens`;
+    meta = `agent: <span class="agent">${escHtml(d.agent)}</span>  in:${d.prompt_tokens||0} out:${d.completion_tokens||0}`;
+    stats.llm++; stats.tokens += d.total_tokens||0;
+    if (d.latency_ms > 0) stats.latencies.push(d.latency_ms);
+  } else if (ev === 'llm_failed') {
+    main = `<span class="model">${escHtml(d.model)}</span> <span class="error">FAILED</span>`;
+    meta = `<span class="error">${escHtml(d.error)}</span>`;
+  } else if (ev === 'agent_step') {
+    main = `<span class="agent">${escHtml(d.agent)}</span> thinking…`;
+    meta = escHtml((d.thought_preview||'').substring(0,120));
+  } else if (ev === 'tool_call') {
+    main = `<span class="agent">${escHtml(d.agent)}</span> → <span class="tool">${escHtml(d.tool)}</span>`;
+    meta = escHtml((d.input_preview||'').substring(0,120));
+  } else if (ev === 'task_start') {
+    main = `▶ <strong>${escHtml(d.task_type)}</strong> started`;
+    meta = `id:${escHtml(d.task_id||'?').substring(0,8)}  ${escHtml(d.topic||'')}`;
+  } else if (ev === 'task_end') {
+    main = `✓ <strong>${escHtml(d.task_type)}</strong> completed`;
+    meta = `id:${escHtml(d.task_id||'?').substring(0,8)}  ${escHtml(d.title||'')}`;
+  } else if (ev === 'task_failed') {
+    main = `✗ <strong>${escHtml(d.task_type)}</strong> <span class="error">FAILED</span>`;
+    meta = `<span class="error">${escHtml(d.error||'')}</span>`;
+  } else {
+    main = escHtml(d.message || JSON.stringify(d));
+  }
+
+  stats.total++;
+  updateStats();
+
+  const empty = document.getElementById('empty');
+  if (empty) empty.remove();
+
+  const log = document.getElementById('log');
+  const div = document.createElement('div');
+  div.className = 'entry';
+  div.innerHTML = `
+    <span class="ts">${fmtTime(d.ts)}</span>
+    <span class="badge badge-${escHtml(ev)}">${ev.replace('_',' ')}</span>
+    <div class="body">
+      <div class="main">${main}</div>
+      ${meta ? '<div class="meta">'+meta+'</div>' : ''}
+    </div>`;
+  log.appendChild(div);
+  if (autoScroll) log.scrollTop = log.scrollHeight;
+}
+
+function connect() {
+  const ws = new WebSocket(WS_URL);
+  const statusEl = document.getElementById('status');
+
+  ws.onopen = () => {
+    statusEl.textContent = 'Connected'; statusEl.className = 'connected';
+  };
+  ws.onmessage = e => {
+    try { renderEvent(JSON.parse(e.data)); } catch {}
+  };
+  ws.onclose = () => {
+    statusEl.textContent = 'Disconnected — reconnecting…'; statusEl.className = 'disconnected';
+    setTimeout(connect, 3000);
+  };
+  ws.onerror = () => ws.close();
+}
+
+document.getElementById('log').addEventListener('scroll', function() {
+  autoScroll = this.scrollTop + this.clientHeight >= this.scrollHeight - 40;
+});
+
+connect();
+</script>
+</body>
+</html>"""
+
+
+@router.get("/monitor", response_class=HTMLResponse, tags=["monitor"])
+async def monitor_page() -> HTMLResponse:
+    """Serve the live monitor HTML dashboard."""
+    return HTMLResponse(content=_MONITOR_HTML)
+
+
+@router.websocket("/ws/monitor")
+async def monitor_websocket(websocket: WebSocket) -> None:
+    """
+    WebSocket endpoint that streams live monitor events to the browser.
+
+    Subscribes to the Redis pub/sub channel tantra:monitor:live and
+    forwards every JSON event to the connected WebSocket client.
+    Multiple clients can connect simultaneously (each gets its own subscriber).
+    """
+    await websocket.accept()
+    try:
+        import redis.asyncio as aioredis
+        from tantra.core.config import settings
+        from tantra.core.monitor import MONITOR_CHANNEL
+
+        r = aioredis.from_url(settings.celery_broker_url, decode_responses=True)
+        async with r.pubsub() as ps:
+            await ps.subscribe(MONITOR_CHANNEL)
+            try:
+                async for message in ps.listen():
+                    if message and message.get("type") == "message":
+                        data = message.get("data", "")
+                        if data:
+                            await websocket.send_text(data)
+            except WebSocketDisconnect:
+                pass
+            except Exception:
+                pass
+            finally:
+                await ps.unsubscribe(MONITOR_CHANNEL)
+        await r.aclose()
+    except Exception:
+        pass

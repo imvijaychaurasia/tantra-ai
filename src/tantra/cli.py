@@ -910,6 +910,23 @@ def director_status() -> None:
                         str(t.id)[:8],
                     )
                 console.print(adhoc_table)
+
+                # Show errors for any failed ad-hoc tasks
+                failed_adhoc = [t for t in adhoc_tasks if t.status == "failed"]
+                if failed_adhoc:
+                    console.print()
+                    console.print("[bold red]Phase 3 Task Errors:[/bold red]")
+                    for t in failed_adhoc:
+                        err = t.error_message or "(no error stored — check celery-worker logs)"
+                        console.print(
+                            f"  [magenta]{t.task_type}[/magenta] "
+                            f"[dim]id={str(t.id)[:8]}[/dim]"
+                        )
+                        console.print(f"    [red]→ {err[:300]}[/red]")
+                    console.print(
+                        "\n[dim]Full traceback: "
+                        "[cyan]docker compose logs celery-worker --tail=200 | grep -A 30 youtube[/cyan][/dim]"
+                    )
         except Exception as _e:
             console.print(f"[dim]Phase 3 tasks: {_e}[/dim]")
 
@@ -1714,6 +1731,145 @@ def director_sessions(
         )
 
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# monitor — live stream of agent/model events
+# ---------------------------------------------------------------------------
+
+@app.command()
+def monitor(
+    filter_event: Optional[str] = typer.Option(
+        None, "--filter", "-f",
+        help="Filter by event type prefix (e.g. llm, agent, tool, task, system)",
+    ),
+    last: int = typer.Option(
+        0, "--last", "-n",
+        help="Show last N events from history before streaming (0 = stream only)",
+    ),
+) -> None:
+    """
+    Stream live agent and model events to the console.
+
+    Subscribes to the tantra:monitor:live Redis pub/sub channel and prints
+    color-coded events as they happen — LLM calls, agent steps, tool use,
+    task lifecycle, system messages.
+
+    Also accessible as a browser dashboard at: http://localhost:8000/monitor
+    (requires tantra-api to be running)
+
+    Examples:
+      tantra monitor                  # all events
+      tantra monitor --filter llm     # only LLM calls
+      tantra monitor --filter tool    # only tool invocations
+    """
+    import json as _json
+
+    from rich.text import Text
+    from tantra.core.config import settings
+    from tantra.core.monitor import MONITOR_CHANNEL
+
+    try:
+        import redis as redis_lib
+        r = redis_lib.from_url(settings.celery_broker_url, decode_responses=True)
+        r.ping()
+    except Exception as exc:
+        console.print(f"[red]Cannot connect to Redis:[/red] {exc}")
+        raise typer.Exit(1)
+
+    EVENT_STYLES: dict[str, tuple[str, str]] = {
+        "llm_start":   ("LLM START ", "blue"),
+        "llm_end":     ("LLM END   ", "cyan"),
+        "llm_failed":  ("LLM FAIL  ", "red"),
+        "agent_step":  ("AGENT STEP", "magenta"),
+        "tool_call":   ("TOOL CALL ", "yellow"),
+        "task_start":  ("TASK START", "green"),
+        "task_end":    ("TASK END  ", "green"),
+        "task_failed": ("TASK FAIL ", "red"),
+        "system":      ("SYSTEM    ", "dim"),
+    }
+
+    def _fmt(d: dict) -> Optional[str]:
+        ev = d.get("event", "system")
+        if filter_event and not ev.startswith(filter_event):
+            return None
+
+        label, colour = EVENT_STYLES.get(ev, (ev.ljust(10)[:10], "white"))
+        ts = str(d.get("ts", ""))[:19].replace("T", " ")
+
+        if ev == "llm_end":
+            detail = (
+                f"[{colour}]{d.get('model','?')}[/{colour}]  "
+                f"[green]{d.get('latency_ms','?')}ms[/green]  "
+                f"{d.get('total_tokens',0)} tok  "
+                f"[dim]agent={d.get('agent','?')}[/dim]"
+            )
+        elif ev == "llm_start":
+            detail = (
+                f"[{colour}]{d.get('model','?')}[/{colour}]  "
+                f"[dim]{d.get('messages_count',0)} msgs  agent={d.get('agent','?')}[/dim]"
+            )
+        elif ev == "llm_failed":
+            detail = f"[red]{d.get('model','?')}[/red]  [red]{str(d.get('error',''))[:120]}[/red]"
+        elif ev == "agent_step":
+            detail = (
+                f"[magenta]{d.get('agent','?')}[/magenta]  "
+                f"[dim]{str(d.get('thought_preview',''))[:100]}[/dim]"
+            )
+        elif ev == "tool_call":
+            detail = (
+                f"[magenta]{d.get('agent','?')}[/magenta] → "
+                f"[yellow]{d.get('tool','?')}[/yellow]  "
+                f"[dim]{str(d.get('input_preview',''))[:80]}[/dim]"
+            )
+        elif ev in ("task_start", "task_end"):
+            detail = (
+                f"[{colour}]{d.get('task_type','?')}[/{colour}]  "
+                f"[dim]id={str(d.get('task_id','?'))[:8]}[/dim]"
+            )
+        elif ev == "task_failed":
+            detail = (
+                f"[red]{d.get('task_type','?')}[/red]  "
+                f"[red]{str(d.get('error',''))[:120]}[/red]"
+            )
+        else:
+            detail = str(d.get("message", _json.dumps(d)))[:120]
+
+        return (
+            f"[dim]{ts}[/dim]  "
+            f"[{colour}]{label}[/{colour}]  "
+            f"{detail}"
+        )
+
+    console.rule("[bold cyan]Tantra AI — Live Monitor[/bold cyan]")
+    console.print(
+        f"[dim]Channel:[/dim] [cyan]{MONITOR_CHANNEL}[/cyan]"
+        + (f"  [dim]filter=[/dim][yellow]{filter_event}[/yellow]" if filter_event else "")
+    )
+    console.print("[dim]Browser dashboard:[/dim] [cyan]http://localhost:8000/monitor[/cyan]")
+    console.print("[dim]Press Ctrl+C to stop.\n[/dim]")
+
+    ps = r.pubsub(ignore_subscribe_messages=True)
+    ps.subscribe(MONITOR_CHANNEL)
+
+    try:
+        for msg in ps.listen():
+            if msg and msg.get("type") == "message":
+                try:
+                    data = _json.loads(msg["data"])
+                    line = _fmt(data)
+                    if line:
+                        console.print(line)
+                except Exception:
+                    pass
+    except KeyboardInterrupt:
+        console.print("\n[dim]Monitor stopped.[/dim]")
+    finally:
+        try:
+            ps.unsubscribe()
+            r.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

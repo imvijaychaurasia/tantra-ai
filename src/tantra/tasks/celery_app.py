@@ -219,7 +219,22 @@ def on_worker_ready(**kwargs) -> None:
             f"Worker startup: DB table init failed (non-fatal): {exc}"
         )
 
-    # ── 2. Recover stuck in-progress tasks from previous crash ────────────
+    # ── 2. Register live monitor callbacks ────────────────────────────────────
+    # LiteLLM callback: captures every LLM API call across all crews/tasks.
+    # Published to Redis pub/sub → browser dashboard + CLI monitor command.
+    try:
+        import litellm
+        from tantra.core.monitor import TantraLiteLLMCallback, MonitorEmitter
+        cb = TantraLiteLLMCallback()
+        # Avoid duplicate registration on hot-reload
+        if not any(isinstance(c, TantraLiteLLMCallback) for c in litellm.callbacks):
+            litellm.callbacks.append(cb)
+        MonitorEmitter.system("Celery worker ready — monitor active")
+        logger.info("Worker startup: LiteLLM monitor callback registered")
+    except Exception as exc:
+        logger.warning(f"Worker startup: LiteLLM callback setup failed (non-fatal): {exc}")
+
+    # ── 3. Recover stuck in-progress tasks from previous crash ────────────
     try:
         from tantra.tasks.director_tasks import recover_stuck_agent_tasks
         result = recover_stuck_agent_tasks()
