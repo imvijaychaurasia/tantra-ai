@@ -1257,11 +1257,49 @@ async def _handle_chat_approval(director, history: list[dict], r, session_id: st
         console.print("[dim]No tasks found in the conversation to commit.[/dim]")
         return
 
-    console.print(f"\n[bold]Tasks to create ([cyan]{len(tasks_raw)}[/cyan]):[/bold]")
-    for i, t in enumerate(tasks_raw, 1):
+    # ── Validate task_type against the Celery handlers that actually exist ────
+    _VALID_TASK_TYPES = {"research_draft", "progress_post", "youtube_script", "analytics_review"}
+    _VALID_ASSIGNED_TO = {"social_crew", "cmo", "cto", "director"}
+
+    valid_tasks = []
+    skipped_tasks = []
+    for t in tasks_raw:
+        tt = t.get("task_type", "")
+        if tt not in _VALID_TASK_TYPES:
+            skipped_tasks.append(t)
+            continue
+        # Normalise assigned_to to a known value; fall back to social_crew
+        at = t.get("assigned_to", "social_crew")
+        if at not in _VALID_ASSIGNED_TO:
+            t["assigned_to"] = "social_crew"
+        valid_tasks.append(t)
+
+    if skipped_tasks:
+        console.print(
+            f"\n[yellow]⚠ Skipped {len(skipped_tasks)} task(s) — task_type not supported by any Celery handler:[/yellow]"
+        )
+        for t in skipped_tasks:
+            console.print(f"  [dim]× {t.get('task_type', '?')}[/dim]")
+        console.print(
+            "[dim]Supported types: [cyan]research_draft[/cyan], [cyan]progress_post[/cyan], "
+            "[cyan]youtube_script[/cyan], [cyan]analytics_review[/cyan]\n"
+            "Phase 3 tasks (YouTube production, Instagram posts, X threads) don't have "
+            "Celery handlers yet — they'll be added when Phase 3 is built.[/dim]"
+        )
+
+    if not valid_tasks:
+        console.print(
+            "[yellow]No executable tasks to commit.[/yellow]\n"
+            "[dim]Use specific task types the system can execute. "
+            "Discussion tasks and strategy planning aren't AgentTasks — they're conversation.[/dim]"
+        )
+        return
+
+    console.print(f"\n[bold]Tasks to create ([cyan]{len(valid_tasks)}[/cyan]):[/bold]")
+    for i, t in enumerate(valid_tasks, 1):
         console.print(
             f"  [dim]{i}.[/dim] [cyan]{t.get('task_type', '?')}[/cyan] "
-            f"[[{t.get('priority', 'medium')}]]  "
+            f"[{t.get('priority', 'medium')}]  "
             f"[dim]{t.get('instructions', '')[:80]}[/dim]"
         )
 
@@ -1284,7 +1322,7 @@ async def _handle_chat_approval(director, history: list[dict], r, session_id: st
             ).scalar_one_or_none()
 
             now = datetime.utcnow()
-            for t in tasks_raw:
+            for t in valid_tasks:
                 db_session.add(AgentTask(
                     plan_id=plan.id if plan else None,
                     task_type=t.get("task_type", "research_draft"),
@@ -1298,9 +1336,9 @@ async def _handle_chat_approval(director, history: list[dict], r, session_id: st
             db_session.commit()
 
         console.print(
-            f"\n[green]✓[/green] Created [cyan]{len(tasks_raw)}[/cyan] AgentTask(s) → pending.\n"
+            f"\n[green]✓[/green] Created [cyan]{len(valid_tasks)}[/cyan] AgentTask(s) → pending.\n"
             "[dim]Dispatch now:[/dim]  "
-            "[cyan]tantra task run director_dispatch_due_tasks --wait[/cyan]"
+            "[cyan]tantra task run dispatch_due_tasks --wait[/cyan]"
         )
     except Exception as exc:
         console.print(f"[red]DB error creating tasks: {exc}[/red]")
