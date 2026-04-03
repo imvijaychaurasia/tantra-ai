@@ -872,6 +872,47 @@ def director_status() -> None:
                 "[cyan]tantra director retry-failed[/cyan][/dim]"
             )
 
+        # ── Phase 3: Ad-hoc tasks (no plan_id — created via director chat) ──────
+        try:
+            from sqlalchemy import select as _select, null
+            adhoc_tasks = session.execute(
+                _select(AgentTask)
+                .where(AgentTask.plan_id == None)  # noqa: E711
+                .where(AgentTask.task_type.in_([
+                    "youtube_script", "youtube_produce", "youtube_publish",
+                ]))
+                .order_by(AgentTask.created_at.desc())
+                .limit(10)
+            ).scalars().all()
+
+            if adhoc_tasks:
+                console.print()
+                adhoc_table = Table(
+                    title="[bold magenta]Phase 3 — Ad-hoc Tasks[/bold magenta]",
+                    border_style="dim",
+                )
+                adhoc_table.add_column("Type", style="magenta")
+                adhoc_table.add_column("Instructions", style="white", max_width=50)
+                adhoc_table.add_column("Status")
+                adhoc_table.add_column("Created", style="dim")
+                adhoc_table.add_column("ID", style="dim")
+                for t in adhoc_tasks:
+                    colour = status_colours.get(t.status, "white")
+                    instr = (t.instructions or "")[:60] or (
+                        str(t.context.get("topic_hint", ""))[:60]
+                        if isinstance(t.context, dict) else ""
+                    )
+                    adhoc_table.add_row(
+                        t.task_type,
+                        instr,
+                        f"[{colour}]{t.status}[/{colour}]",
+                        str(t.created_at)[:16] if t.created_at else "—",
+                        str(t.id)[:8],
+                    )
+                console.print(adhoc_table)
+        except Exception as _e:
+            console.print(f"[dim]Phase 3 tasks: {_e}[/dim]")
+
         # ── Phase 3: YouTube Videos section ───────────────────────────────────
         try:
             from tantra.db.social import YouTubeVideo

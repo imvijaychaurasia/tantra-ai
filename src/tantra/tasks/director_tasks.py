@@ -239,10 +239,11 @@ def get_director_context() -> Optional[dict[str, Any]]:
 # Internal: persist WeeklyPlan + AgentTasks to DB
 # ---------------------------------------------------------------------------
 
-def _save_weekly_plan(plan_data, agent_tasks_data: list[dict]) -> str:
+def _save_weekly_plan(plan_data, agent_tasks_data: list[dict]) -> tuple[str, int]:
     """
     Persist a WeeklyPlanData + list of task dicts to the DB.
-    Returns the new WeeklyPlan UUID.
+    Returns (plan_uuid_str, tasks_inserted) — tasks_inserted may be < len(agent_tasks_data)
+    when re-running on an existing week with tasks already present (deduplication).
     """
     from tantra.db.director import AgentTask, WeeklyPlan
 
@@ -316,8 +317,29 @@ def _save_weekly_plan(plan_data, agent_tasks_data: list[dict]) -> str:
             session.flush()  # get ID before commit
             plan_id = plan.id
 
-        # Save AgentTasks
+        # Save AgentTasks — deduplicated by (plan_id, task_type, scheduled_for).
+        # If a row with the same key already exists (pending, in_progress, OR completed)
+        # skip inserting a duplicate.  This prevents double-rows when weekly_planning
+        # is re-run manually on a week that already has tasks in flight or finished.
+        from sqlalchemy import select as _select
+        existing_keys: set[tuple] = set()
+        existing_tasks = session.execute(
+            _select(AgentTask.task_type, AgentTask.scheduled_for)
+            .where(AgentTask.plan_id == plan_id)
+        ).all()
+        for row in existing_tasks:
+            # Normalise scheduled_for to minute precision for comparison
+            sf = row.scheduled_for.replace(second=0, microsecond=0) if row.scheduled_for else None
+            existing_keys.add((row.task_type, sf))
+
+        inserted = 0
         for t in agent_tasks_data:
+            sf = t.get("scheduled_for")
+            sf_norm = sf.replace(second=0, microsecond=0) if sf else None
+            dedup_key = (t["task_type"], sf_norm)
+            if dedup_key in existing_keys:
+                logger.info(f"Skipping duplicate AgentTask {t['task_type']} @ {sf_norm}")
+                continue
             agent_task = AgentTask(
                 id=uuid.uuid4(),
                 plan_id=plan_id,
@@ -327,14 +349,16 @@ def _save_weekly_plan(plan_data, agent_tasks_data: list[dict]) -> str:
                 status="pending",
                 instructions=t.get("instructions", ""),
                 context=t.get("context", {}),
-                scheduled_for=t.get("scheduled_for"),
+                scheduled_for=sf,
                 created_at=datetime.utcnow(),
             )
             session.add(agent_task)
+            existing_keys.add(dedup_key)
+            inserted += 1
 
         session.commit()
-        logger.info(f"Saved WeeklyPlan {plan_id} + {len(agent_tasks_data)} tasks to DB")
-        return str(plan_id)
+        logger.info(f"Saved WeeklyPlan {plan_id} + {inserted}/{len(agent_tasks_data)} tasks to DB (deduped)")
+        return str(plan_id), inserted
     except Exception:
         session.rollback()
         raise
@@ -588,8 +612,9 @@ def weekly_planning() -> dict:
             _weekly_planning_pipeline(director, week_start, perf)
         )
 
-        # Persist to DB (sync)
-        plan_id = _save_weekly_plan(plan_data, agent_tasks_data)
+        # Persist to DB (sync); tasks_inserted may be < len(agent_tasks_data) when
+        # re-running on an existing week (deduplication skips already-present tasks)
+        plan_id, tasks_inserted = _save_weekly_plan(plan_data, agent_tasks_data)
 
         # Activate the new plan
         _activate_weekly_plan(plan_id)
@@ -600,7 +625,7 @@ def weekly_planning() -> dict:
             "week_start": str(plan_data.week_start),
             "week_number": plan_data.week_number,
             "goals": plan_data.goals,
-            "tasks_created": len(agent_tasks_data),
+            "tasks_created": tasks_inserted,
             "analysis": plan_data.director_analysis[:300],
         }
         logger.info(
