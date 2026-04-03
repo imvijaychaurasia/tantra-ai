@@ -1340,6 +1340,30 @@ async def _handle_chat_approval(director, history: list[dict], r, session_id: st
             "[dim]Dispatch now:[/dim]  "
             "[cyan]tantra task run dispatch_due_tasks --wait[/cyan]"
         )
+
+        # ── Inject a committed-note into conversation history ─────────────────
+        # This prevents the NEXT approval trigger in the same session from
+        # re-extracting and re-creating the exact same tasks.
+        # The Director will see this note and return [] on the next extraction.
+        committed_summary = ", ".join(
+            f"{t.get('task_type')} ({t.get('priority','medium')})"
+            for t in valid_tasks
+        )
+        history.append({
+            "role": "assistant",
+            "content": (
+                f"[COMMITTED] Tasks already created in DB: {committed_summary}. "
+                "These are now pending dispatch — do NOT extract them again. "
+                "Only create new tasks if the user explicitly requests something different."
+            ),
+        })
+        # Persist updated history so the note survives a resume
+        history_key = f"tantra:director:chat:{session_id}:history"
+        try:
+            r.setex(history_key, chat_ttl, json.dumps(history))
+        except Exception:
+            pass
+
     except Exception as exc:
         console.print(f"[red]DB error creating tasks: {exc}[/red]")
 

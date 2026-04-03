@@ -483,14 +483,16 @@ class DirectorAgent(LeaderAgent):
         # Each pattern is a regex with word boundaries.
         # r"\bexecute\b" matches "execute" but NOT "executed" / "executing".
         approval_patterns = [
-            r"\bapprove[d]?\b",      # approve / approved
-            r"\bgo ahead\b",          # go ahead
-            r"\bexecute\b",           # execute  (NOT executed / executing)
-            r"\bcommit\b",            # commit
-            r"\bproceed\b",           # proceed
-            r"\bdo it\b",             # do it
-            r"\blet'?s do it\b",      # let's do it / lets do it
-            r"\bship it\b",           # ship it
+            r"\bapprove[d]?\b",          # approve / approved / "Yes, I approve"
+            r"\bgo ahead\b",              # go ahead
+            r"^go[.!?]*$",               # bare "go" / "go!" — entire message only
+            r"\bexecute\b",              # execute  (NOT executed / executing)
+            r"\bcommit\b",               # commit
+            r"\bproceed\b",              # proceed / "yes proceed"
+            r"\bdo it\b",                # do it
+            r"\blet'?s do it\b",         # let's do it / lets do it
+            r"\bship it\b",              # ship it
+            r"^yes[,!\s]+go\b",          # "yes go" / "yes, go" — entire message starts with yes + go
         ]
         lower = message.strip().lower()
         return any(re.search(pat, lower) for pat in approval_patterns)
