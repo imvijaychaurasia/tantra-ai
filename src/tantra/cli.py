@@ -1287,22 +1287,32 @@ async def _handle_chat_approval(director, history: list[dict], r, session_id: st
     )
 
     extraction_prompt = (
-        "Based on our conversation above, extract every task I have explicitly "
-        "approved or asked you to execute.\n\n"
-        "Return ONLY a JSON array (no commentary):\n"
+        "The user has just confirmed approval — they typed an approval word (approve/go/execute).\n"
+        "Extract EVERY task that was proposed, requested, or discussed in this conversation "
+        "that should now be committed to the DB and dispatched to a worker.\n\n"
+        "Include any task the user asked to create or run, even if they did not say 'approved' "
+        "inline — the approval word they just typed covers all proposed tasks.\n\n"
+        "Return ONLY a JSON array (no commentary, no markdown fences):\n"
         "[\n"
         "  {\n"
-        '    "task_type": "research_draft|progress_post|youtube_script|analytics_review",\n'
-        '    "assigned_to": "social_crew|cmo|cto|director",\n'
+        '    "task_type": "research_draft|progress_post|youtube_script|youtube_produce|youtube_publish|analytics_review",\n'
+        '    "assigned_to": "social_crew|youtube_crew|media_crew|cmo|cto|director",\n'
         '    "priority": "high|medium|low",\n'
         '    "instructions": "<exact instructions from our conversation>",\n'
-        '    "context": {"topic_hint": "<optional topic>"}\n'
+        '    "context": {"topic_hint": "<optional topic hint>"}\n'
         "  }\n"
         "]\n\n"
-        "If no specific tasks were discussed, return []."
+        "If the conversation contains NO tasks at all (e.g. it was purely informational), return [].\n"
+        "For youtube_script tasks, set assigned_to to youtube_crew."
     )
 
-    extraction_history = history + [{"role": "user", "content": extraction_prompt}]
+    # Inject approval keyword into extraction history so the LLM knows the user approved.
+    # The real approval turn is intercepted before it reaches `history`, so we simulate it here.
+    extraction_history = history + [
+        {"role": "user", "content": "approve"},
+        {"role": "assistant", "content": "Understood — I will now extract and commit all proposed tasks."},
+        {"role": "user", "content": extraction_prompt},
+    ]
     extraction_response = ""
     with console.status("[cyan]Director extracting tasks…[/cyan]"):
         try:

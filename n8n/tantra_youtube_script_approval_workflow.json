@@ -40,7 +40,7 @@
     {
       "parameters": {
         "operation": "send",
-        "chatId": "={{ $vars.TELEGRAM_CHAT_ID || '' }}",
+        "chatId": "=",
         "text": "={{ $node['Format Review Message'].json.message }}",
         "additionalFields": {
           "parse_mode": "Markdown"
@@ -55,8 +55,8 @@
     },
     {
       "parameters": {
-        "from": "={{ $vars.SMTP_FROM || 'tantra@localhost' }}",
-        "to": "={{ $vars.REVIEW_EMAIL || '' }}",
+        "from": "tantra@localhost",
+        "to": "",
         "subject": "=🎬 YouTube Script Review: {{ $node['Format Review Message'].json.title }}",
         "emailFormat": "text",
         "text": "={{ $node['Format Review Message'].json.message }}\n\nFull script available at:\n{{ $node['Format Review Message'].json.approvalUrl.replace('/approve', '') }}"
@@ -85,7 +85,7 @@
     },
     {
       "parameters": {
-        "url": "={{ $vars.TANTRA_API_URL || 'http://tantra-api:8000' }}/api/v1/youtube/{{ $json.video_id }}/approve",
+        "url": "=http://tantra-api:8000/api/v1/youtube/{{ $json.video_id }}/approve",
         "sendBody": true,
         "bodyParameters": {
           "parameters": [
@@ -130,7 +130,7 @@
     },
     {
       "parameters": {
-        "url": "={{ $vars.TANTRA_API_URL || 'http://tantra-api:8000' }}/api/v1/youtube/{{ $json.video_id }}/reject",
+        "url": "=http://tantra-api:8000/api/v1/youtube/{{ $json.video_id }}/reject",
         "sendBody": true,
         "bodyParameters": {
           "parameters": [
@@ -211,12 +211,14 @@
   },
   "_comment": {
     "setup": [
-      "1. Import this workflow into n8n: n8n CLI or UI import",
-      "2. Set n8n Variables: TANTRA_API_URL, TELEGRAM_CHAT_ID (optional), REVIEW_EMAIL (optional)",
-      "3. Configure Telegram credentials (if using Telegram notification)",
-      "4. Configure SMTP credentials (if using email notification)",
-      "5. Add to .env: N8N_YOUTUBE_SCRIPT_WEBHOOK=http://n8n:5678/webhook/tantra-youtube-script",
-      "6. Activate the workflow in n8n",
+      "1. Import this workflow into n8n UI: Workflows → Import from file",
+      "2. No variables needed — Tantra API URL is hardcoded to http://tantra-api:8000 (same Docker network)",
+      "   NOTE: n8n Community edition does not support Variables; this workflow works without them.",
+      "3. (Optional) Configure Telegram credentials and update chatId in the Telegram node",
+      "4. (Optional) Configure SMTP credentials and update from/to in the Email node",
+      "5. If Telegram/Email not used — keep those nodes disabled (default)",
+      "6. Add to .env: N8N_YOUTUBE_SCRIPT_WEBHOOK=http://n8n:5678/webhook/tantra-youtube-script",
+      "7. Activate the workflow in n8n",
       "",
       "Approval flow:",
       "  Tantra API → POST /webhook/tantra-youtube-script (script ready)",
