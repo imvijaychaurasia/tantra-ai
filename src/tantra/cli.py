@@ -1196,5 +1196,310 @@ def director_tasks_list(
         console.print(table)
 
 
+# ---------------------------------------------------------------------------
+# director chat — async helpers (called via asyncio.run)
+# ---------------------------------------------------------------------------
+
+async def _handle_chat_approval(director, history: list[dict], r, session_id: str, chat_ttl: int) -> None:
+    """
+    Extract AgentTasks from the conversation and commit them to the DB.
+    Called when the user types an approval keyword (approve / go / execute / …).
+    """
+    import json
+    from datetime import datetime
+
+    from tantra.agents.director import _extract_json
+
+    console.print(
+        "\n[bold yellow]⚡ Approval detected[/bold yellow]  "
+        "[dim]— asking Director to extract tasks…[/dim]"
+    )
+
+    extraction_prompt = (
+        "Based on our conversation above, extract every task I have explicitly "
+        "approved or asked you to execute.\n\n"
+        "Return ONLY a JSON array (no commentary):\n"
+        "[\n"
+        "  {\n"
+        '    "task_type": "research_draft|progress_post|youtube_script|analytics_review",\n'
+        '    "assigned_to": "social_crew|cmo|cto|director",\n'
+        '    "priority": "high|medium|low",\n'
+        '    "instructions": "<exact instructions from our conversation>",\n'
+        '    "context": {"topic_hint": "<optional topic>"}\n'
+        "  }\n"
+        "]\n\n"
+        "If no specific tasks were discussed, return []."
+    )
+
+    extraction_history = history + [{"role": "user", "content": extraction_prompt}]
+    extraction_response = ""
+    with console.status("[cyan]Director extracting tasks…[/cyan]"):
+        try:
+            gen = await director.converse(extraction_history)
+            async for token in gen:
+                extraction_response += token
+        except Exception as exc:
+            console.print(f"[red]Task extraction failed: {exc}[/red]")
+            return
+
+    try:
+        tasks_raw = _extract_json(extraction_response)
+        if not isinstance(tasks_raw, list):
+            raise ValueError("Expected JSON array")
+    except Exception as exc:
+        console.print(
+            f"[yellow]Could not parse task list ({exc}).[/yellow]\n"
+            "[dim]Be specific: tell the Director exactly which tasks to run, then say 'approve'.[/dim]"
+        )
+        return
+
+    if not tasks_raw:
+        console.print("[dim]No tasks found in the conversation to commit.[/dim]")
+        return
+
+    console.print(f"\n[bold]Tasks to create ([cyan]{len(tasks_raw)}[/cyan]):[/bold]")
+    for i, t in enumerate(tasks_raw, 1):
+        console.print(
+            f"  [dim]{i}.[/dim] [cyan]{t.get('task_type', '?')}[/cyan] "
+            f"[[{t.get('priority', 'medium')}]]  "
+            f"[dim]{t.get('instructions', '')[:80]}[/dim]"
+        )
+
+    try:
+        from datetime import datetime
+
+        from sqlalchemy import create_engine, select
+        from sqlalchemy.orm import sessionmaker
+        from tantra.core.config import settings
+        from tantra.db.director import AgentTask, WeeklyPlan
+
+        engine = create_engine(settings.database_sync_url, echo=False)
+        DBSession = sessionmaker(bind=engine)
+        with DBSession() as db_session:
+            plan = db_session.execute(
+                select(WeeklyPlan)
+                .where(WeeklyPlan.status == "active")
+                .order_by(WeeklyPlan.week_start.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+
+            now = datetime.utcnow()
+            for t in tasks_raw:
+                db_session.add(AgentTask(
+                    plan_id=plan.id if plan else None,
+                    task_type=t.get("task_type", "research_draft"),
+                    assigned_to=t.get("assigned_to", "social_crew"),
+                    priority=t.get("priority", "medium"),
+                    instructions=t.get("instructions", ""),
+                    context=t.get("context", {}),
+                    scheduled_for=now,
+                    status="pending",
+                ))
+            db_session.commit()
+
+        console.print(
+            f"\n[green]✓[/green] Created [cyan]{len(tasks_raw)}[/cyan] AgentTask(s) → pending.\n"
+            "[dim]Dispatch now:[/dim]  "
+            "[cyan]tantra task run director_dispatch_due_tasks --wait[/cyan]"
+        )
+    except Exception as exc:
+        console.print(f"[red]DB error creating tasks: {exc}[/red]")
+
+
+async def _director_chat_session(resume_session_id: Optional[str]) -> None:
+    """
+    Full async implementation of the Director chat REPL.
+    Runs inside asyncio.run() called by the Typer command.
+    """
+    import json
+    import time
+    import uuid
+    from datetime import datetime
+
+    import redis as _redis_lib
+    from rich.prompt import Prompt
+    from tantra.agents.director import DirectorAgent
+    from tantra.core.config import settings
+
+    CHAT_TTL = 30 * 24 * 3600          # 30-day session persistence
+    CHAT_INDEX_KEY = "tantra:director:chat:index"
+
+    # ── Redis DB3 ─────────────────────────────────────────────────────────────
+    redis_url = settings.celery_broker_url.replace("/1", "/3")
+    r = _redis_lib.from_url(redis_url, decode_responses=True)
+
+    # ── Session init ──────────────────────────────────────────────────────────
+    session_id = resume_session_id or str(uuid.uuid4())[:12]
+    history_key = f"tantra:director:chat:{session_id}:history"
+    meta_key    = f"tantra:director:chat:{session_id}:meta"
+
+    raw_history = r.get(history_key)
+    history: list[dict] = json.loads(raw_history) if raw_history else []
+
+    raw_meta = r.get(meta_key)
+    meta: dict = json.loads(raw_meta) if raw_meta else {
+        "session_id": session_id,
+        "created_at": datetime.utcnow().isoformat(),
+        "message_count": 0,
+        "last_active": datetime.utcnow().isoformat(),
+    }
+
+    # ── Banner ────────────────────────────────────────────────────────────────
+    _banner()
+    resumed = bool(history)
+    turns = meta.get("message_count", 0)
+    console.print(Panel(
+        f"[bold cyan]Director Chat[/bold cyan]  —  Interactive REPL\n"
+        f"[dim]Session ID: {session_id}[/dim]\n\n"
+        + (f"[dim]Resumed — {turns} previous turn(s)[/dim]\n" if resumed else "")
+        + "[dim]Type [cyan]exit[/cyan] or Ctrl+C to quit.  "
+          "Say [yellow]approve[/yellow] / [yellow]go[/yellow] / [yellow]execute[/yellow] to commit tasks.[/dim]",
+        border_style="cyan",
+    ))
+
+    # Show last exchange as context
+    if history:
+        last_two = history[-2:] if len(history) >= 2 else history
+        for msg in last_two:
+            label = "[bold cyan]You[/bold cyan]" if msg["role"] == "user" else "[bold magenta]Director[/bold magenta]"
+            preview = msg["content"][:280] + ("…" if len(msg["content"]) > 280 else "")
+            console.print(f"\n{label}: [dim]{preview}[/dim]")
+        console.print()
+
+    director = DirectorAgent()
+
+    # ── REPL loop ─────────────────────────────────────────────────────────────
+    while True:
+        try:
+            user_input = Prompt.ask("\n[bold cyan]You[/bold cyan]")
+        except (KeyboardInterrupt, EOFError):
+            console.print(
+                f"\n[dim]Session saved. Resume:[/dim]  "
+                f"[cyan]tantra director chat --resume {session_id}[/cyan]"
+            )
+            break
+
+        stripped = user_input.strip()
+        if not stripped:
+            continue
+        if stripped.lower() in ("exit", "quit", "bye", ":q", "q"):
+            console.print(
+                f"[dim]Session saved. Resume:[/dim]  "
+                f"[cyan]tantra director chat --resume {session_id}[/cyan]"
+            )
+            break
+
+        # Add user turn to history
+        history.append({"role": "user", "content": stripped})
+
+        # ── Stream Director response ──────────────────────────────────────────
+        console.print(f"\n[bold magenta]Director[/bold magenta] [dim]▶[/dim] ", end="")
+        full_response = ""
+        try:
+            gen = await director.converse(history)
+            async for token in gen:
+                console.print(token, end="", highlight=False)
+                full_response += token
+        except Exception as exc:
+            console.print(f"\n[red]LLM error: {exc}[/red]")
+            console.print("[dim]Check litellm is running (port 4000) and qwen3:30b is pulled.[/dim]")
+            history.pop()   # revert — no response was stored
+            continue
+
+        console.print()     # newline after streamed response
+
+        # Add assistant turn
+        history.append({"role": "assistant", "content": full_response})
+        meta["message_count"] = sum(1 for m in history if m["role"] == "user")
+        meta["last_active"] = datetime.utcnow().isoformat()
+
+        # ── Persist to Redis ──────────────────────────────────────────────────
+        try:
+            r.setex(history_key, CHAT_TTL, json.dumps(history))
+            r.setex(meta_key,    CHAT_TTL, json.dumps(meta))
+            r.zadd(CHAT_INDEX_KEY, {session_id: time.time()})
+            r.expire(CHAT_INDEX_KEY, CHAT_TTL)
+        except Exception:
+            pass    # non-fatal — session lives in memory for this run
+
+        # ── Approval check ────────────────────────────────────────────────────
+        if DirectorAgent.should_approve(stripped):
+            await _handle_chat_approval(director, history, r, session_id, CHAT_TTL)
+
+
+# ---------------------------------------------------------------------------
+# director chat / director sessions — Typer commands
+# ---------------------------------------------------------------------------
+
+@director_app.command("chat")
+def director_chat(
+    resume: Optional[str] = typer.Option(
+        None, "--resume", "-r",
+        help="Resume a previous session by its session ID",
+    ),
+) -> None:
+    """
+    Interactive Director chat — multi-turn streaming conversation with the CAIO.
+
+    Session history is stored in Redis DB3 for 30 days.
+
+    Examples:
+
+      tantra director chat                        # new session
+      tantra director chat --resume abc123        # resume existing session
+      tantra director sessions                    # list all sessions
+    """
+    asyncio.run(_director_chat_session(resume))
+
+
+@director_app.command("sessions")
+def director_sessions(
+    limit: int = typer.Option(10, "--limit", "-n", help="Max sessions to show"),
+) -> None:
+    """List all saved Director chat sessions."""
+    import json
+
+    import redis as _redis_lib
+    from tantra.core.config import settings
+
+    _banner()
+
+    try:
+        redis_url = settings.celery_broker_url.replace("/1", "/3")
+        r = _redis_lib.from_url(redis_url, decode_responses=True)
+        sessions = r.zrevrangebyscore(
+            "tantra:director:chat:index", "+inf", "-inf",
+            start=0, num=limit, withscores=True,
+        )
+    except Exception as exc:
+        console.print(f"[red]Redis connection error: {exc}[/red]")
+        raise typer.Exit(1)
+
+    if not sessions:
+        console.print("[yellow]No chat sessions found.[/yellow]")
+        console.print("[dim]Start one with: tantra director chat[/dim]")
+        return
+
+    table = Table(title="Director Chat Sessions", border_style="dim")
+    table.add_column("Session ID", style="cyan")
+    table.add_column("Turns", justify="right")
+    table.add_column("Created", style="dim")
+    table.add_column("Last Active", style="dim")
+    table.add_column("Resume Command", style="dim")
+
+    for session_id, _ in sessions:
+        raw = r.get(f"tantra:director:chat:{session_id}:meta")
+        meta = json.loads(raw) if raw else {}
+        table.add_row(
+            session_id,
+            str(meta.get("message_count", "?")),
+            str(meta.get("created_at", "?"))[:16],
+            str(meta.get("last_active", "?"))[:16],
+            f"tantra director chat --resume {session_id}",
+        )
+
+    console.print(table)
+
+
 if __name__ == "__main__":
     app()

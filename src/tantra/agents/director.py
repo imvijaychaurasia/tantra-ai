@@ -22,7 +22,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from typing import Any, Optional
+from typing import Any, AsyncIterator, Optional
 
 from tantra.agents.leader import LeaderAgent
 from tantra.core.config import ModelTier
@@ -154,6 +154,38 @@ Write a concise performance review. Return a JSON object:
   "next_week_priority": "<one-sentence recommendation for next week's Director>",
   "tone_assessment": "<was the tone right? what to adjust?>"
 }}
+"""
+
+DIRECTOR_CHAT_SYSTEM_PROMPT = """
+You are the Director of Tantra AI (तंत्र) — the Chief AI Intelligence Officer (CAIO).
+
+You are having a direct terminal conversation with Vijay, the founder and sole developer.
+
+## Your capabilities in this session
+- Discuss and shape content strategy, platform direction, and growth priorities
+- Plan tasks beyond the weekly schedule (ad-hoc research, experiments, platform launches)
+- Review performance: what's working, what needs adjustment
+- Brainstorm monetisation paths (LinkedIn leads, YouTube, Instagram, X)
+- Advise on architecture and capability gaps in the Tantra stack
+- When asked, decompose conversation outcomes into concrete AgentTasks committed to the DB
+
+## Approval signals
+When Vijay says 'approve', 'go', 'execute', 'commit', 'do it', 'proceed', or 'let's do it':
+→ This means: extract all discussed tasks and commit them as AgentTask rows.
+→ A follow-up system call will prompt you for a structured JSON list — provide it precisely.
+
+## Tone
+Strategic, direct, confident. C-suite executive talking to the CEO.
+Skip pleasantries. Cut to insight. Use first-person ("I recommend", "I'll handle that").
+Be concise — no bullet-point dumps unless genuinely warranted.
+
+## Tantra AI context
+- Stack: Python + CrewAI + Ollama (local GPU) + FastAPI + Celery + Redis + Postgres + Qdrant + n8n
+- Phase 1 ✅: LinkedIn content pipeline (research → draft → approve → publish) — LIVE
+- Phase 2 ✅: Director planning engine (weekly plans, AgentTask dispatch) — LIVE
+- Models: qwen3:30b (director), qwen3:14b (manager/worker), qwen3:4b (fast), bge-m3 (embedder)
+- GPU: RTX 5070 Ti 16GB — all inference is local
+- Phase 3 (planned): YouTube + Instagram + X earning engine (auto + manual modes)
 """
 
 TASK_DECOMPOSITION_PROMPT = """
@@ -384,6 +416,60 @@ class DirectorAgent(LeaderAgent):
 
         logger.info(f"Director decomposed {len(deduplicated)} agent tasks from plan")
         return deduplicated
+
+    async def converse(
+        self,
+        history: list[dict[str, str]],
+    ) -> AsyncIterator[str]:
+        """
+        Stream a conversational response from the Director LLM.
+
+        The caller should pass the full message history (including the current
+        user turn as the last entry).  The system prompt is injected automatically.
+
+        Args:
+            history: OpenAI-format messages [{"role": "user"|"assistant", "content": "..."}].
+                     The latest user message must be the final element.
+
+        Returns:
+            Async iterator of token strings (call `await converse(history)` then
+            `async for token in result: ...`).
+
+        Example:
+            history.append({"role": "user", "content": "What should we post this week?"})
+            gen = await director.converse(history)
+            async for token in gen:
+                print(token, end="", flush=True)
+        """
+        from tantra.core.llm import chat
+
+        messages: list[dict[str, str]] = [
+            {"role": "system", "content": DIRECTOR_CHAT_SYSTEM_PROMPT},
+            *history,
+        ]
+
+        return await chat(
+            messages=messages,
+            model=self.model_tier,
+            temperature=0.7,
+            max_tokens=4096,
+            stream=True,
+        )
+
+    @staticmethod
+    def should_approve(message: str) -> bool:
+        """
+        Return True if the user message contains an approval keyword.
+
+        Approval signals that the conversation content should be decomposed
+        into AgentTask rows and committed to the DB.
+        """
+        approval_keywords = {
+            "approve", "go", "execute", "commit", "proceed",
+            "do it", "let's do it", "lets do it", "ship it",
+        }
+        lower = message.strip().lower()
+        return any(kw in lower for kw in approval_keywords)
 
     async def review_week(
         self,
