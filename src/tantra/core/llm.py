@@ -97,18 +97,26 @@ async def _stream_chat(
     max_tokens: int,
     **kwargs: Any,
 ) -> AsyncIterator[str]:
-    """Yield token deltas from a streaming completion."""
-    async with client.chat.completions.stream(
+    """
+    Yield token deltas from a streaming completion.
+
+    Uses .create(stream=True) which returns AsyncStream[ChatCompletionChunk]
+    where each chunk has the standard .choices[0].delta.content structure.
+
+    NOTE: .stream() (the newer typed-events API) yields ChunkEvent objects
+    that do NOT have .choices — that's why we use .create(stream=True) here.
+    """
+    stream = await client.chat.completions.create(
         model=model,
         messages=messages,  # type: ignore[arg-type]
         temperature=temperature,
         max_tokens=max_tokens,
+        stream=True,
         **kwargs,
-    ) as stream:
-        async for chunk in stream:
-            delta = chunk.choices[0].delta.content
-            if delta:
-                yield delta
+    )
+    async for chunk in stream:
+        if chunk.choices and chunk.choices[0].delta.content:
+            yield chunk.choices[0].delta.content
 
 
 async def embed(
