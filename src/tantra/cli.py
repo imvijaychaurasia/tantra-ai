@@ -1427,14 +1427,39 @@ async def _director_chat_session(resume_session_id: Optional[str]) -> None:
             )
             break
 
-        # Add user turn to history
+        # ── Intercept approval keywords BEFORE sending to LLM ────────────────
+        # If the user sends a standalone approval word ("execute", "approve", etc.)
+        # we must NOT forward it to the model — the model would treat "execute" as
+        # a natural language command and hallucinate a response, then the extraction
+        # would run on that hallucinated content instead of the real conversation.
+        if DirectorAgent.should_approve(stripped):
+            console.print(
+                f"\n[bold yellow]⚡ Approval keyword detected[/bold yellow]  "
+                "[dim]— skipping LLM response, extracting tasks from conversation above…[/dim]"
+            )
+            # Run extraction against history WITHOUT the approval keyword message
+            # (the bare "approve"/"execute" is not a meaningful conversational turn)
+            await _handle_chat_approval(director, history, r, session_id, CHAT_TTL)
+            # Save updated session state (approval may have added tasks to context)
+            try:
+                meta["last_active"] = datetime.utcnow().isoformat()
+                r.setex(history_key, CHAT_TTL, json.dumps(history))
+                r.setex(meta_key,    CHAT_TTL, json.dumps(meta))
+            except Exception:
+                pass
+            continue    # back to REPL prompt — no LLM response needed
+
+        # ── Add user turn to history ──────────────────────────────────────────
         history.append({"role": "user", "content": stripped})
+
+        # ── Get live system context (fast DB read, grounds Director in reality) ─
+        live_ctx = DirectorAgent.get_live_context()
 
         # ── Stream Director response ──────────────────────────────────────────
         console.print(f"\n[bold magenta]Director[/bold magenta] [dim]▶[/dim] ", end="")
         full_response = ""
         try:
-            gen = await director.converse(history)
+            gen = await director.converse(history, live_context=live_ctx)
             async for token in gen:
                 console.print(token, end="", highlight=False)
                 full_response += token
@@ -1459,10 +1484,6 @@ async def _director_chat_session(resume_session_id: Optional[str]) -> None:
             r.expire(CHAT_INDEX_KEY, CHAT_TTL)
         except Exception:
             pass    # non-fatal — session lives in memory for this run
-
-        # ── Approval check ────────────────────────────────────────────────────
-        if DirectorAgent.should_approve(stripped):
-            await _handle_chat_approval(director, history, r, session_id, CHAT_TTL)
 
 
 # ---------------------------------------------------------------------------

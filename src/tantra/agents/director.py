@@ -427,6 +427,7 @@ class DirectorAgent(LeaderAgent):
     async def converse(
         self,
         history: list[dict[str, str]],
+        live_context: Optional[str] = None,
     ) -> AsyncIterator[str]:
         """
         Stream a conversational response from the Director LLM.
@@ -450,10 +451,14 @@ class DirectorAgent(LeaderAgent):
         """
         from tantra.core.llm import chat
 
+        # Base system prompt + optional live DB context as a second system message
+        # (OpenAI / LiteLLM supports multiple system messages)
         messages: list[dict[str, str]] = [
             {"role": "system", "content": DIRECTOR_CHAT_SYSTEM_PROMPT},
-            *history,
         ]
+        if live_context:
+            messages.append({"role": "system", "content": live_context})
+        messages.extend(history)
 
         return await chat(
             messages=messages,
@@ -466,17 +471,95 @@ class DirectorAgent(LeaderAgent):
     @staticmethod
     def should_approve(message: str) -> bool:
         """
-        Return True if the user message contains an approval keyword.
+        Return True if the user message contains a standalone approval keyword.
+
+        Uses regex word boundaries so "executed" does NOT match "execute",
+        and "ongoing" does NOT match "go".  Only standalone trigger words count.
 
         Approval signals that the conversation content should be decomposed
         into AgentTask rows and committed to the DB.
         """
-        approval_keywords = {
-            "approve", "go", "execute", "commit", "proceed",
-            "do it", "let's do it", "lets do it", "ship it",
-        }
+        import re
+        # Each pattern is a regex with word boundaries.
+        # r"\bexecute\b" matches "execute" but NOT "executed" / "executing".
+        approval_patterns = [
+            r"\bapprove[d]?\b",      # approve / approved
+            r"\bgo ahead\b",          # go ahead
+            r"\bexecute\b",           # execute  (NOT executed / executing)
+            r"\bcommit\b",            # commit
+            r"\bproceed\b",           # proceed
+            r"\bdo it\b",             # do it
+            r"\blet'?s do it\b",      # let's do it / lets do it
+            r"\bship it\b",           # ship it
+        ]
         lower = message.strip().lower()
-        return any(kw in lower for kw in approval_keywords)
+        return any(re.search(pat, lower) for pat in approval_patterns)
+
+    @staticmethod
+    def get_live_context() -> str:
+        """
+        Read current DB state and return a context string injected into every
+        Director LLM call.  Keeps the model grounded in the actual system state
+        rather than inventing context.
+
+        Fast synchronous DB read — typically < 10 ms.
+        Returns empty string on any error (non-fatal).
+        """
+        lines = ["## Live Tantra System State (read from DB right now)"]
+        try:
+            from sqlalchemy import create_engine, select
+            from sqlalchemy.orm import sessionmaker
+            from tantra.core.config import settings
+            from tantra.db.director import AgentTask, WeeklyPlan
+
+            engine = create_engine(settings.database_sync_url, echo=False)
+            DBSession = sessionmaker(bind=engine)
+            with DBSession() as session:
+                plan = session.execute(
+                    select(WeeklyPlan)
+                    .where(WeeklyPlan.status == "active")
+                    .order_by(WeeklyPlan.week_start.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
+
+                if plan:
+                    goals = plan.goals or {}
+                    lines.append(
+                        f"Active plan: Week {plan.week_number}/{plan.year} "
+                        f"(starts {plan.week_start})"
+                    )
+                    lines.append(f"Primary topic: {goals.get('primary_topic', '?')}")
+                    lines.append(
+                        f"Targets: {goals.get('linkedin_posts_target', '?')} LinkedIn posts, "
+                        f"{goals.get('progress_posts_target', '?')} progress posts"
+                    )
+                    if plan.director_analysis:
+                        lines.append(f"Plan analysis: {plan.director_analysis[:250]}")
+
+                    tasks = session.execute(
+                        select(AgentTask)
+                        .where(AgentTask.plan_id == plan.id)
+                        .order_by(AgentTask.scheduled_for.asc())
+                    ).scalars().all()
+
+                    if tasks:
+                        by_status: dict[str, list[str]] = {}
+                        for t in tasks:
+                            by_status.setdefault(t.status, []).append(t.task_type)
+                        task_lines = [
+                            f"  {status} ({len(types)}): {', '.join(types)}"
+                            for status, types in by_status.items()
+                        ]
+                        lines.append("AgentTasks in this plan:")
+                        lines.extend(task_lines)
+                    else:
+                        lines.append("AgentTasks: none yet")
+                else:
+                    lines.append("No active weekly plan. Run: tantra task run weekly_planning")
+        except Exception as exc:
+            lines.append(f"(Could not load system state: {exc})")
+
+        return "\n".join(lines)
 
     async def review_week(
         self,
