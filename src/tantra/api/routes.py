@@ -855,3 +855,187 @@ async def trigger_weekly_planning() -> JSONResponse:
         "celery_task_id": result.id,
         "message": "Weekly planning task queued. Check /director/status after ~60s.",
     })
+
+
+# ---------------------------------------------------------------------------
+# YouTube endpoints  (Phase 3a)
+# ---------------------------------------------------------------------------
+
+class YouTubeApproveRequest(BaseModel):
+    approved_by: Optional[str] = "n8n"
+    notes: Optional[str] = None   # Optional reviewer notes
+
+
+class YouTubeRejectRequest(BaseModel):
+    reason: Optional[str] = None
+    rejected_by: Optional[str] = "n8n"
+
+
+@router.get("/youtube/", tags=["youtube"])
+async def list_youtube_videos(
+    status: Optional[str] = Query(None, description="Filter by status: scripted|approved|producing|produced|uploading|live|rejected|failed"),
+    limit: int = Query(20, ge=1, le=100),
+    db: AsyncSession = Depends(get_db_dep),
+) -> JSONResponse:
+    """
+    List YouTube videos in the production pipeline.
+    Filter by status to find scripted (awaiting approval), live, etc.
+    """
+    from sqlalchemy import select
+    from tantra.db.social import YouTubeVideo
+
+    query = select(YouTubeVideo).order_by(YouTubeVideo.created_at.desc()).limit(limit)
+    if status:
+        query = query.where(YouTubeVideo.status == status)
+
+    result = await db.execute(query)
+    videos = result.scalars().all()
+
+    return JSONResponse({
+        "videos": [
+            {
+                "id": str(v.id),
+                "title": v.title,
+                "status": v.status,
+                "topic_hint": v.topic_hint,
+                "thumbnail_concept": v.thumbnail_concept,
+                "tags": v.tags or [],
+                "youtube_url": v.youtube_url,
+                "views": v.views,
+                "scene_count": len((v.script or {}).get("scenes", [])),
+                "created_at": v.created_at.isoformat() if v.created_at else None,
+                "approved_at": v.approved_at.isoformat() if v.approved_at else None,
+                "uploaded_at": v.uploaded_at.isoformat() if v.uploaded_at else None,
+            }
+            for v in videos
+        ],
+        "total": len(videos),
+    })
+
+
+@router.get("/youtube/{video_id}", tags=["youtube"])
+async def get_youtube_video(
+    video_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db_dep),
+) -> JSONResponse:
+    """
+    Get full details for a specific YouTube video, including the complete script.
+    Used by n8n approval workflow to display the script for review.
+    """
+    from tantra.db.social import YouTubeVideo
+
+    video = await db.get(YouTubeVideo, video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail=f"YouTubeVideo {video_id} not found")
+
+    return JSONResponse({
+        "id": str(video.id),
+        "title": video.title,
+        "description": video.description,
+        "status": video.status,
+        "topic_hint": video.topic_hint,
+        "script": video.script,
+        "thumbnail_concept": video.thumbnail_concept,
+        "tags": video.tags or [],
+        "youtube_url": video.youtube_url,
+        "youtube_video_id": video.youtube_video_id,
+        "views": video.views,
+        "likes": video.likes,
+        "comments": video.comments,
+        "agent_task_id": str(video.agent_task_id) if video.agent_task_id else None,
+        "n8n_execution_id": video.n8n_execution_id,
+        "rejection_reason": video.rejection_reason,
+        "error_message": video.error_message,
+        "created_at": video.created_at.isoformat() if video.created_at else None,
+        "approved_at": video.approved_at.isoformat() if video.approved_at else None,
+        "produced_at": video.produced_at.isoformat() if video.produced_at else None,
+        "uploaded_at": video.uploaded_at.isoformat() if video.uploaded_at else None,
+    })
+
+
+@router.post("/youtube/{video_id}/approve", tags=["youtube"])
+async def approve_youtube_script(
+    video_id: uuid.UUID,
+    body: YouTubeApproveRequest,
+    db: AsyncSession = Depends(get_db_dep),
+) -> JSONResponse:
+    """
+    n8n calls this endpoint when a human approves a YouTube script.
+    Transitions YouTubeVideo from 'scripted' → 'approved'.
+
+    Phase 3b will queue a youtube_produce AgentTask here.
+    Phase 3a: just transitions status and returns success.
+    """
+    from tantra.db.social import YouTubeVideo
+
+    video = await db.get(YouTubeVideo, video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail=f"YouTubeVideo {video_id} not found")
+
+    if video.status not in ("scripted",):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot approve video in status '{video.status}'. Expected: scripted",
+        )
+
+    video.status = "approved"
+    video.approved_at = datetime.utcnow()
+    await db.commit()
+
+    # Phase 3b: queue produce task
+    # For now, log that production is pending Phase 3b
+    import logging
+    _logger = logging.getLogger(__name__)
+    _logger.info(
+        "YouTube script approved: video_id=%s title=%r approved_by=%s. "
+        "Production pipeline (Phase 3b) not yet implemented — video stays in 'approved'.",
+        str(video_id), video.title, body.approved_by,
+    )
+
+    return JSONResponse({
+        "success": True,
+        "video_id": str(video_id),
+        "status": "approved",
+        "message": (
+            "Script approved. Video queued for production when Phase 3b "
+            "tantra-media service is deployed."
+        ),
+        "approved_by": body.approved_by,
+    })
+
+
+@router.post("/youtube/{video_id}/reject", tags=["youtube"])
+async def reject_youtube_script(
+    video_id: uuid.UUID,
+    body: YouTubeRejectRequest,
+    db: AsyncSession = Depends(get_db_dep),
+) -> JSONResponse:
+    """
+    n8n calls this endpoint when a human rejects a YouTube script.
+    Transitions YouTubeVideo from 'scripted' → 'rejected'.
+    A new youtube_script AgentTask can be created to try again with adjusted brief.
+    """
+    from tantra.db.social import YouTubeVideo
+
+    video = await db.get(YouTubeVideo, video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail=f"YouTubeVideo {video_id} not found")
+
+    if video.status not in ("scripted",):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cannot reject video in status '{video.status}'. Expected: scripted",
+        )
+
+    video.status = "rejected"
+    video.rejection_reason = body.reason
+    await db.commit()
+
+    return JSONResponse({
+        "success": True,
+        "video_id": str(video_id),
+        "status": "rejected",
+        "rejection_reason": body.reason,
+        "rejected_by": body.rejected_by,
+        "message": "Script rejected. Commission a new youtube_script task via Director chat to retry.",
+    })

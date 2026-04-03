@@ -1,0 +1,229 @@
+{
+  "name": "Tantra YouTube Script Approval",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "tantra-youtube-script",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-trigger",
+      "name": "Webhook — Script Ready",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "tantra-youtube-script-approval"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Extract script details from Tantra API payload\nconst data = $input.first().json;\n\nconst videoId = data.video_id || '';\nconst title = data.title || 'Untitled';\nconst hook = data.hook || '';\nconst sceneCount = data.scene_count || 0;\nconst durationSecs = data.duration_target_seconds || 0;\nconst thumbnailConcept = data.thumbnail_concept || '';\nconst thumbnailPrompt = data.thumbnail_prompt || '';\nconst sceneSummary = data.scene_summary || '';\nconst tags = (data.tags || []).join(', ');\nconst approvalUrl = data.approval_url || '';\nconst rejectionUrl = data.rejection_url || '';\n\n// Format duration\nconst durationMin = Math.floor(durationSecs / 60);\nconst durStr = `${durationMin} min (${durationSecs}s)`;\n\n// Build human-readable review message\nconst message = [\n  `🎬 *YouTube Script Ready for Review*`,\n  ``,\n  `*Title:* ${title}`,\n  `*Duration:* ${durStr} | *Scenes:* ${sceneCount}`,\n  ``,\n  `*Hook (first 15s):*`,\n  `${hook}`,\n  ``,\n  `*Thumbnail Concept:*`,\n  `${thumbnailConcept}`,\n  ``,\n  `*Scene Summary (first 6):*`,\n  `${sceneSummary}`,\n  ``,\n  `*Tags:* ${tags}`,\n  ``,\n  `*Actions:*`,\n  `✅ Approve: POST ${approvalUrl}`,\n  `❌ Reject: POST ${rejectionUrl}`,\n  ``,\n  `*Video ID:* \\`${videoId}\\``,\n].join('\\n');\n\nreturn [\n  {\n    json: {\n      videoId,\n      title,\n      hook,\n      sceneCount,\n      durationStr: durStr,\n      thumbnailConcept,\n      thumbnailPrompt,\n      sceneSummary,\n      tags,\n      approvalUrl,\n      rejectionUrl,\n      message,\n      rawPayload: data,\n    }\n  }\n];"
+      },
+      "id": "format-message",
+      "name": "Format Review Message",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"success\": true, \"message\": \"Script received and review notification sent\", \"executionId\": \"{{ $execution.id }}\" }",
+        "options": {}
+      },
+      "id": "respond-to-webhook",
+      "name": "Respond to Tantra API",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [460, 480]
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "chatId": "={{ $vars.TELEGRAM_CHAT_ID || '' }}",
+        "text": "={{ $node['Format Review Message'].json.message }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "telegram-notify",
+      "name": "Telegram Notification",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [680, 200],
+      "notes": "Optional — configure TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID in n8n credentials. Delete this node if not using Telegram."
+    },
+    {
+      "parameters": {
+        "from": "={{ $vars.SMTP_FROM || 'tantra@localhost' }}",
+        "to": "={{ $vars.REVIEW_EMAIL || '' }}",
+        "subject": "=🎬 YouTube Script Review: {{ $node['Format Review Message'].json.title }}",
+        "emailFormat": "text",
+        "text": "={{ $node['Format Review Message'].json.message }}\n\nFull script available at:\n{{ $node['Format Review Message'].json.approvalUrl.replace('/approve', '') }}"
+      },
+      "id": "email-notify",
+      "name": "Email Notification",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [680, 360],
+      "notes": "Optional — configure SMTP credentials in n8n. Delete this node if not using email."
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "tantra-youtube-approve",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "approve-webhook",
+      "name": "Webhook — Approve Script",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 600],
+      "webhookId": "tantra-youtube-approve",
+      "notes": "Human-triggered: POST /webhook/tantra-youtube-approve with {\"video_id\": \"...\", \"notes\": \"...\"}"
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.TANTRA_API_URL || 'http://tantra-api:8000' }}/api/v1/youtube/{{ $json.video_id }}/approve",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "approved_by", "value": "n8n-workflow" },
+            { "name": "notes", "value": "={{ $json.notes || '' }}" }
+          ]
+        },
+        "options": { "timeout": 10000 }
+      },
+      "id": "call-approve-api",
+      "name": "Call Tantra Approve API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 600]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"success\": true, \"action\": \"approved\", \"video_id\": \"{{ $json.video_id }}\" }",
+        "options": {}
+      },
+      "id": "respond-approve",
+      "name": "Respond Approved",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [680, 600]
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "tantra-youtube-reject",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "reject-webhook",
+      "name": "Webhook — Reject Script",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 780],
+      "webhookId": "tantra-youtube-reject",
+      "notes": "Human-triggered: POST /webhook/tantra-youtube-reject with {\"video_id\": \"...\", \"reason\": \"...\"}"
+    },
+    {
+      "parameters": {
+        "url": "={{ $vars.TANTRA_API_URL || 'http://tantra-api:8000' }}/api/v1/youtube/{{ $json.video_id }}/reject",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            { "name": "rejected_by", "value": "n8n-workflow" },
+            { "name": "reason", "value": "={{ $json.reason || 'Rejected via n8n' }}" }
+          ]
+        },
+        "options": { "timeout": 10000 }
+      },
+      "id": "call-reject-api",
+      "name": "Call Tantra Reject API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [460, 780]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"success\": true, \"action\": \"rejected\", \"video_id\": \"{{ $json.video_id }}\" }",
+        "options": {}
+      },
+      "id": "respond-reject",
+      "name": "Respond Rejected",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [680, 780]
+    }
+  ],
+  "connections": {
+    "Webhook — Script Ready": {
+      "main": [
+        [
+          { "node": "Format Review Message", "type": "main", "index": 0 },
+          { "node": "Respond to Tantra API", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Format Review Message": {
+      "main": [
+        [
+          { "node": "Telegram Notification", "type": "main", "index": 0 },
+          { "node": "Email Notification", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Webhook — Approve Script": {
+      "main": [
+        [{ "node": "Call Tantra Approve API", "type": "main", "index": 0 }]
+      ]
+    },
+    "Call Tantra Approve API": {
+      "main": [
+        [{ "node": "Respond Approved", "type": "main", "index": 0 }]
+      ]
+    },
+    "Webhook — Reject Script": {
+      "main": [
+        [{ "node": "Call Tantra Reject API", "type": "main", "index": 0 }]
+      ]
+    },
+    "Call Tantra Reject API": {
+      "main": [
+        [{ "node": "Respond Rejected", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "staticData": null,
+  "tags": ["tantra-ai", "youtube", "phase-3"],
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "instanceId": "tantra-ai-local"
+  },
+  "_comment": {
+    "setup": [
+      "1. Import this workflow into n8n: n8n CLI or UI import",
+      "2. Set n8n Variables: TANTRA_API_URL, TELEGRAM_CHAT_ID (optional), REVIEW_EMAIL (optional)",
+      "3. Configure Telegram credentials (if using Telegram notification)",
+      "4. Configure SMTP credentials (if using email notification)",
+      "5. Add to .env: N8N_YOUTUBE_SCRIPT_WEBHOOK=http://n8n:5678/webhook/tantra-youtube-script",
+      "6. Activate the workflow in n8n",
+      "",
+      "Approval flow:",
+      "  Tantra API → POST /webhook/tantra-youtube-script (script ready)",
+      "  → n8n sends Telegram/email notification",
+      "  → You review script at: GET http://localhost:8000/api/v1/youtube/{video_id}",
+      "  → To approve: POST /webhook/tantra-youtube-approve {\"video_id\": \"...\"}",
+      "  → To reject:  POST /webhook/tantra-youtube-reject {\"video_id\": \"...\", \"reason\": \"...\"}"
+    ]
+  }
+}

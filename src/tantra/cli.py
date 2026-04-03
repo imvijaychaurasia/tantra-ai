@@ -128,8 +128,25 @@ def crew(
         console.print("[green]Crew assembled. Running...[/green]\n")
         result = c.kickoff(inputs={"task": task})
         console.print(Panel(str(result), title="[green]Crew Result[/green]", border_style="green"))
+    elif domain == "youtube":
+        from tantra.crews.youtube_crew import build_youtube_crew, parse_script_output
+        with console.status("[cyan]Assembling YouTube script crew...[/cyan]"):
+            c = build_youtube_crew(topic_hint=task, verbose=verbose)
+        console.print("[green]YouTube crew assembled. Running...[/green]\n")
+        result = c.kickoff()
+        raw = str(result.raw if hasattr(result, "raw") else result)
+        script = parse_script_output(raw)
+        if script:
+            import json as _json
+            console.print(Panel(
+                _json.dumps(script, indent=2)[:3000],
+                title="[green]YouTube Script (JSON)[/green]",
+                border_style="green",
+            ))
+        else:
+            console.print(Panel(raw[:2000], title="[yellow]Raw Output[/yellow]", border_style="yellow"))
     else:
-        console.print(f"[red]Unknown domain: {domain}[/red]. Available: social")
+        console.print(f"[red]Unknown domain: {domain}[/red]. Available: social, youtube")
         raise typer.Exit(1)
 
 
@@ -855,6 +872,60 @@ def director_status() -> None:
                 "[cyan]tantra director retry-failed[/cyan][/dim]"
             )
 
+        # ── Phase 3: YouTube Videos section ───────────────────────────────────
+        try:
+            from tantra.db.social import YouTubeVideo
+            from sqlalchemy import select as _select
+
+            yt_videos = session.execute(
+                _select(YouTubeVideo)
+                .order_by(YouTubeVideo.created_at.desc())
+                .limit(10)
+            ).scalars().all()
+
+            if yt_videos:
+                console.print()
+                yt_status_colours = {
+                    "scripted": "yellow", "approved": "cyan", "producing": "blue",
+                    "produced": "magenta", "uploading": "cyan", "live": "green",
+                    "rejected": "dim", "failed": "red",
+                }
+                yt_table = Table(title="[bold cyan]YouTube Videos[/bold cyan]", border_style="dim")
+                yt_table.add_column("Title", style="white", max_width=40)
+                yt_table.add_column("Status")
+                yt_table.add_column("Scenes", justify="right", style="dim")
+                yt_table.add_column("Views", justify="right", style="dim")
+                yt_table.add_column("YouTube URL / Note", style="dim", max_width=45)
+
+                for v in yt_videos:
+                    colour = yt_status_colours.get(v.status, "white")
+                    scenes = len((v.script or {}).get("scenes", []))
+                    url_or_note = (
+                        v.youtube_url or
+                        ("awaiting approval" if v.status == "scripted" else
+                         "production pending" if v.status == "approved" else
+                         "rejection reason: " + (v.rejection_reason or "—") if v.status == "rejected" else
+                         "—")
+                    )
+                    yt_table.add_row(
+                        (v.title or "Untitled")[:40],
+                        f"[{colour}]{v.status}[/{colour}]",
+                        str(scenes) if scenes else "—",
+                        f"{v.views:,}" if v.views else "—",
+                        url_or_note[:45],
+                    )
+
+                console.print(yt_table)
+                live_count = sum(1 for v in yt_videos if v.status == "live")
+                pending_count = sum(1 for v in yt_videos if v.status in ("scripted", "approved", "producing", "produced", "uploading"))
+                console.print(
+                    f"[dim]YouTube: {len(yt_videos)} video(s) — "
+                    f"live: {live_count}, in pipeline: {pending_count}[/dim]"
+                )
+        except Exception as yt_exc:
+            # YouTube section is non-fatal — DB table may not exist yet before first migration
+            console.print(f"[dim](YouTube section unavailable: {yt_exc})[/dim]")
+
 
 @director_app.command("retry-failed")
 def director_retry_failed(
@@ -1258,8 +1329,18 @@ async def _handle_chat_approval(director, history: list[dict], r, session_id: st
         return
 
     # ── Validate task_type against the Celery handlers that actually exist ────
-    _VALID_TASK_TYPES = {"research_draft", "progress_post", "youtube_script", "analytics_review"}
-    _VALID_ASSIGNED_TO = {"social_crew", "cmo", "cto", "director"}
+    _VALID_TASK_TYPES = {
+        # Phase 1 — LinkedIn
+        "research_draft",
+        "progress_post",
+        # Phase 2 — Analytics
+        "analytics_review",
+        # Phase 3 — YouTube
+        "youtube_script",    # director chat → YouTubeCrew → script → n8n approval
+        "youtube_produce",   # tantra-media → TTS + video/images + assembly (Phase 3b)
+        "youtube_publish",   # YouTube Data API upload (Phase 3c)
+    }
+    _VALID_ASSIGNED_TO = {"social_crew", "youtube_crew", "media_crew", "cmo", "cto", "director"}
 
     valid_tasks = []
     skipped_tasks = []

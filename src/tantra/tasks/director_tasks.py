@@ -85,11 +85,16 @@ def _make_session():
 # Tuned to be generous (2× expected runtime) so normal long runs aren't killed.
 # research_draft runs the full 4-agent crew; allow 45 min before declaring stuck.
 _STUCK_THRESHOLDS: dict[str, timedelta] = {
-    "research_draft":   timedelta(minutes=45),  # crew can take 15-20 min locally
+    # Phase 1
+    "research_draft":   timedelta(minutes=45),  # 4-agent crew can take 15-20 min locally
     "progress_post":    timedelta(minutes=15),   # LLM gen + Zernio API
-    "analytics_review": timedelta(minutes=25),   # CMO crew
-    "youtube_script":   timedelta(minutes=20),   # script generation
     "engagement_scan":  timedelta(minutes=12),   # feed scan + comment gen
+    # Phase 2
+    "analytics_review": timedelta(minutes=25),   # CMO crew
+    # Phase 3 — YouTube
+    "youtube_script":   timedelta(minutes=40),   # 4-agent crew; generous for local models
+    "youtube_produce":  timedelta(minutes=150),  # TTS + video gen + assembly (Phase 3b)
+    "youtube_publish":  timedelta(minutes=45),   # YouTube resumable upload (Phase 3c)
 }
 _DEFAULT_STUCK_THRESHOLD = timedelta(minutes=30)
 
@@ -813,9 +818,39 @@ def _dispatch_task_type(task_type: str, instructions: str, context: dict) -> dic
         return _eager_call(er)
 
     elif task_type == "youtube_script":
-        from tantra.tasks.social_tasks import youtube_analytics_pull
-        er = youtube_analytics_pull.apply()
-        return _eager_call(er)
+        # Phase 3a: run YouTubeCrew → script → n8n approval webhook
+        # Pass the AgentTask ID so generate_youtube_script can update status and result
+        from tantra.tasks.youtube_tasks import generate_youtube_script
+        return generate_youtube_script(task_id)
+
+    elif task_type == "youtube_produce":
+        # Phase 3b (stub): produce_youtube_video called with YouTubeVideo ID
+        # from AgentTask.result["youtube_video_id"]
+        from tantra.db.director import AgentTask as _AT
+        _session = _make_session()
+        try:
+            _at = _session.get(_AT, uuid.UUID(task_id))
+            yt_vid_id = (_at.context or {}).get("youtube_video_id") if _at else None
+        finally:
+            _session.close()
+        if not yt_vid_id:
+            return {"success": False, "error": "youtube_video_id not in AgentTask.context"}
+        from tantra.tasks.youtube_tasks import produce_youtube_video
+        return produce_youtube_video(yt_vid_id)
+
+    elif task_type == "youtube_publish":
+        # Phase 3c (stub): upload to YouTube
+        from tantra.db.director import AgentTask as _AT
+        _session = _make_session()
+        try:
+            _at = _session.get(_AT, uuid.UUID(task_id))
+            yt_vid_id = (_at.context or {}).get("youtube_video_id") if _at else None
+        finally:
+            _session.close()
+        if not yt_vid_id:
+            return {"success": False, "error": "youtube_video_id not in AgentTask.context"}
+        from tantra.tasks.youtube_tasks import upload_youtube_video
+        return upload_youtube_video(yt_vid_id)
 
     elif task_type == "analytics_review":
         return cmo_review()

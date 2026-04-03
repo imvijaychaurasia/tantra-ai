@@ -124,11 +124,14 @@ class Settings(BaseSettings):
 
     # ── n8n Workflow Automation ───────────────────────────────────────────────
     # n8n runs at localhost:5678 in the Docker stack
-    # Content draft webhook — tantra-api POSTs here when a new draft is ready for review
+    # Phase 1: LinkedIn content draft webhook
     n8n_content_draft_webhook: str = "http://n8n:5678/webhook/tantra-content-draft"
     # Approval callback — n8n POSTs back here with approve/reject decision
-    # This is the URL tantra-api exposes for n8n to call after human review
     n8n_approval_callback_base: str = "http://tantra-api:8000/api/v1/content"
+    # Phase 3: YouTube script approval webhook
+    # Tantra API POSTs here when a YouTube script is ready for human review
+    # Set N8N_YOUTUBE_SCRIPT_WEBHOOK in .env after importing the workflow into n8n
+    n8n_youtube_script_webhook: Optional[str] = None
 
     # ── YouTube / Google Data API ─────────────────────────────────────────────
     youtube_api_key: Optional[SecretStr] = None

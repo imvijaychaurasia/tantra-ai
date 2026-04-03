@@ -40,6 +40,7 @@ app.config_from_object({
     "include": [
         "tantra.tasks.social_tasks",    # Phase 1: LinkedIn pipeline + engagement tasks
         "tantra.tasks.director_tasks",  # Phase 2: Director planning + task dispatch
+        "tantra.tasks.youtube_tasks",   # Phase 3: YouTube content pipeline
     ],
 
     # Queues
@@ -163,6 +164,11 @@ app.conf.beat_schedule = {
         "options": {"queue": "agents"},
     },
 
+    # ── Phase 3: YouTube content pipeline ────────────────────────────────────
+    # YouTube script generation fires when dispatch_due_tasks picks up a
+    # youtube_script AgentTask created by Director weekly_planning or chat.
+    # No direct beat schedule needed — AgentTask.scheduled_for drives timing.
+
     # ── Resilience: stuck-task recovery ───────────────────────────────────────
     # Runs every 15 minutes to detect AgentTasks stuck in 'in_progress' state
     # after a worker crash or unplanned restart.  Resets them to 'pending' so
@@ -202,6 +208,7 @@ def on_worker_ready(**kwargs) -> None:
         from tantra.core.database import Base
         import tantra.db          # registers Phase 1 models (ContentQueueItem, User, …)
         import tantra.db.director # registers Phase 2 models (WeeklyPlan, AgentTask)
+        import tantra.db.social   # registers Phase 3 models (YouTubeVideo)
 
         engine = create_engine(settings.database_sync_url, echo=False)
         Base.metadata.create_all(engine)
@@ -358,3 +365,59 @@ def director_recover_stuck_tasks(self: Celery) -> dict:
     """
     from tantra.tasks.director_tasks import recover_stuck_agent_tasks
     return recover_stuck_agent_tasks()
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: YouTube Tasks
+# (full implementations live in youtube_tasks.py — registered via include=)
+# ---------------------------------------------------------------------------
+
+@app.task(
+    bind=True,
+    name="tantra.tasks.youtube.generate_youtube_script",
+    queue="agents",
+    soft_time_limit=25 * 60,   # 25 min: YouTubeCrew ~10-15 min + buffer
+    time_limit=30 * 60,        # 30 min: hard kill
+)
+def youtube_generate_script(self: Celery, agent_task_id: str) -> dict:
+    """
+    Run YouTubeCrew (researcher → writer → SEO → reviewer) to produce a
+    scene-by-scene video script. Sends n8n approval webhook when done.
+
+    Dispatched by execute_agent_task when an AgentTask of type 'youtube_script'
+    is due. The agent_task_id is the UUID of the AgentTask row.
+    """
+    from tantra.tasks.youtube_tasks import generate_youtube_script
+    return generate_youtube_script(agent_task_id)
+
+
+@app.task(
+    bind=True,
+    name="tantra.tasks.youtube.produce_youtube_video",
+    queue="agents",
+    soft_time_limit=90 * 60,   # 90 min: TTS + per-scene video/image gen + assembly
+    time_limit=120 * 60,       # 120 min: hard kill
+)
+def youtube_produce_video(self: Celery, youtube_video_id: str) -> dict:
+    """
+    Call tantra-media API to generate TTS, video/images, thumbnail, and
+    assemble the final MP4. Phase 3b implementation — currently a stub.
+    """
+    from tantra.tasks.youtube_tasks import produce_youtube_video
+    return produce_youtube_video(youtube_video_id)
+
+
+@app.task(
+    bind=True,
+    name="tantra.tasks.youtube.upload_youtube_video",
+    queue="agents",
+    soft_time_limit=30 * 60,   # 30 min: YouTube resumable upload
+    time_limit=60 * 60,        # 60 min: hard kill (large files)
+)
+def youtube_upload_video(self: Celery, youtube_video_id: str) -> dict:
+    """
+    Upload a produced MP4 to YouTube via Data API v3 (resumable upload).
+    Sets custom thumbnail. Phase 3c implementation — currently a stub.
+    """
+    from tantra.tasks.youtube_tasks import upload_youtube_video
+    return upload_youtube_video(youtube_video_id)
