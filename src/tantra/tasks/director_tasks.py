@@ -771,7 +771,7 @@ def execute_agent_task(task_id: str) -> dict:
         _update_agent_task_status(task_id, "in_progress")
 
         # Dispatch to the appropriate Phase 1 task
-        result = _dispatch_task_type(task_type, instructions, context)
+        result = _dispatch_task_type(task_type, instructions, context, task_id)
 
         # Treat "skipped due to cooldown" as completed, not failed.
         # post_tantra_progress returns success=True + skipped=True when the
@@ -816,7 +816,7 @@ def _eager_call(er) -> dict:
     return {"success": True}
 
 
-def _dispatch_task_type(task_type: str, instructions: str, context: dict) -> dict:
+def _dispatch_task_type(task_type: str, instructions: str, context: dict, task_id: str = "") -> dict:
     """
     Map a task_type string to the actual Phase 1 task function and run it
     in-process via task.apply() (eager/synchronous execution).
