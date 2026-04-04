@@ -59,11 +59,15 @@ data/n8n/
 data/openwebui/
 data/models/
 data/uploads/
+# Ollama model weights — large binaries, re-pullable via 'make pull-models'
+data/ollama/
 # tantra-media output (large media files — never commit)
 data/media/audio/
 data/media/images/
 data/media/clips/
 data/media/output/
+# Postgres actual data lives in pgdata/ subdirectory (gitkeep in parent is committed)
+data/postgres/pgdata/
 
 # Ollama model cache
 *.gguf

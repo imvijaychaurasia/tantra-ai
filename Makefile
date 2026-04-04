@@ -81,16 +81,24 @@ down-volumes: ## DESTRUCTIVE — stop containers + wipe ALL data (bind mounts in
 	@sleep 5
 	docker compose down -v
 
-nuke: ## FULL WIPE — stop containers + delete ALL data including ./data/ bind mounts
+nuke: ## FULL WIPE — stop containers + delete ALL bind-mount data (Postgres, Redis, n8n, media, etc.)
 	@echo ""
-	@echo "  ☠️  FULL DATA WIPE: This will delete ./data/ (Postgres, Redis, Qdrant, n8n, OpenWebUI)"
-	@echo "  AND all Docker named volumes (ollama models). ALL DATA WILL BE LOST."
+	@echo "  ☠️  FULL DATA WIPE: This deletes ALL ./data/ subdirectories:"
+	@echo "      postgres/pgdata  redis  qdrant  n8n  openwebui  media"
+	@echo ""
+	@echo "  ⚠️  Ollama models (./data/ollama/) are kept by default."
+	@echo "      Add NUKE_MODELS=1 to also wipe models: make nuke NUKE_MODELS=1"
 	@echo ""
 	@echo "  Proceeding in 10 seconds... Ctrl+C to abort."
 	@sleep 10
 	docker compose down -v
-	rm -rf data/postgres data/redis data/qdrant data/n8n data/openwebui
-	@echo "  All data wiped."
+	rm -rf data/postgres/pgdata data/redis data/qdrant data/n8n data/openwebui data/media/audio data/media/images data/media/clips data/media/output
+	@if [ "$(NUKE_MODELS)" = "1" ]; then \
+	  echo "  ☠️  NUKE_MODELS=1 set — wiping Ollama models (./data/ollama/)..."; \
+	  rm -rf data/ollama; \
+	  echo "  Re-download models with: make pull-models"; \
+	fi
+	@echo "  All data wiped. Run 'make up' to start fresh."
 
 backup: ## Back up all persistent data to ./backups/tantra-YYYY-MM-DD-HH-MM/
 	@BACKUP_DIR="backups/tantra-$$(date +%Y-%m-%d-%H-%M)"; \
@@ -105,6 +113,7 @@ backup: ## Back up all persistent data to ./backups/tantra-YYYY-MM-DD-HH-MM/
 	cp -r data/n8n "$$BACKUP_DIR/n8n" 2>/dev/null || true; \
 	echo "  $(CYAN)Copying OpenWebUI data...$(RESET)"; \
 	cp -r data/openwebui "$$BACKUP_DIR/openwebui" 2>/dev/null || true; \
+	echo "  $(CYAN)Note: Ollama models (./data/ollama/) not copied — they are large and re-pullable.$(RESET)"; \
 	echo "  $(GREEN)✓ Backup complete: $$BACKUP_DIR$(RESET)"; \
 	du -sh "$$BACKUP_DIR"
 
@@ -240,9 +249,16 @@ litellm: ## Open LiteLLM dashboard
 media-ui: ## Open tantra-media API docs
 	open http://localhost:8100/docs
 
-create-media-dirs: ## Create ./data/media/ subdirectories (run once after cloning)
-	mkdir -p data/media/audio data/media/images data/media/clips data/media/output
-	@echo "  $(GREEN)✓ data/media/ directories created$(RESET)"
+create-dirs: ## Create all ./data/ subdirectories (run once after cloning)
+	mkdir -p data/postgres/pgdata data/postgres-init \
+	         data/redis data/qdrant \
+	         data/n8n data/openwebui \
+	         data/ollama \
+	         data/media/audio data/media/images data/media/clips data/media/output \
+	         data/uploads data/models
+	@echo "  $(GREEN)✓ ./data/ directories created$(RESET)"
+
+create-media-dirs: create-dirs ## Alias for create-dirs (backwards compat)
 
 # ---------------------------------------------------------------------------
 # Validation

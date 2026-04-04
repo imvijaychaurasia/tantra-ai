@@ -36,14 +36,14 @@ networks:
         - subnet: 172.28.0.0/16
 
 volumes:
-  # ollama-data stays as a named volume — model weights are large (10-30 GB each)
-  # and are re-pullable. Bind mount would require re-downloading all models.
-  ollama-data:
-  # All other stateful services use bind mounts (./data/<service>/) so that:
+  # All stateful services use bind mounts (./data/<service>/) so that:
   #   • Data survives 'docker compose down -v' (bind mounts are NOT deleted by -v)
   #   • Data is at a known host path — easy to back up with 'make backup'
   #   • Data is visible and inspectable directly on the host filesystem
   #   • Machine reboots / Docker daemon restarts cannot lose data
+  #
+  # Ollama is now also a bind mount at ./data/ollama/
+  # This ensures 10-30 GB of downloaded model weights survive any Docker operation.
 
 # =============================================================================
 services:
@@ -56,7 +56,7 @@ services:
     image: postgres:16-alpine
     container_name: tantra-postgres
     volumes:
-      - ./data/postgres:/var/lib/postgresql/data          # bind mount — safe from 'down -v'
+      - ./data/postgres/pgdata:/var/lib/postgresql/data   # subdirectory — .gitkeep stays in parent, initdb gets a clean dir
       - ./data/postgres-init:/docker-entrypoint-initdb.d:ro
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
@@ -127,7 +127,7 @@ services:
     image: ollama/ollama:latest
     container_name: tantra-ollama
     volumes:
-      - ollama-data:/root/.ollama
+      - ./data/ollama:/root/.ollama                       # bind mount — model weights (10-30 GB) survive any Docker operation
     ports:
       - "${OLLAMA_PORT:-11434}:11434"
     environment:
