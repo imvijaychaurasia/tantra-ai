@@ -24,8 +24,10 @@
 
 general_settings:
   master_key: "os.environ/LITELLM_MASTER_KEY"
-  database_url: "postgresql://tantra:tantradevtestkey@postgres:5432/tantra"
-  disable_spend_logs: false
+  # database_url intentionally omitted — we use LiteLLM as a pure model proxy.
+  # No analytics, no DB-stored model configs, no Prisma dependency.
+  # All model configs are defined statically in this YAML file.
+  disable_spend_logs: true
   disable_master_key_return: true
 
 litellm_settings:

@@ -160,7 +160,8 @@ services:
       - "${LITELLM_PORT:-4000}:4000"
     environment:
       LITELLM_CONFIG: /app/config.yaml
-      STORE_MODEL_IN_DB: "False"
+      # No DATABASE_URL — we use LiteLLM as a pure model proxy (no analytics/spend DB)
+      # All model configs are in litellm_config.yaml, not the DB
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
@@ -177,7 +178,7 @@ services:
       interval: 30s
       timeout: 15s
       retries: 5
-      start_period: 60s
+      start_period: 90s    # extended: LiteLLM takes 30-60s to load model list on slow hardware
 
   # ---------------------------------------------------------------------------
   # 6. TANTRA API — FastAPI (REST + WebSocket + Auth)
