@@ -47,10 +47,16 @@ node_modules/
 .npm/
 dist/
 
-# Docker volumes (local data — excluded from git)
+# Docker bind-mount data directories — excluded from git (data lives on host)
+# These directories hold all persistent service data (Postgres, Redis, Qdrant, n8n, OpenWebUI)
+# NEVER delete these directories unless you want to wipe the stack's data.
+# To back up: make backup     To restore: copy ./data/ from backup
 data/postgres/
+data/postgres-init/
 data/redis/
 data/qdrant/
+data/n8n/
+data/openwebui/
 data/models/
 data/uploads/
 

@@ -67,13 +67,51 @@ _open-links:
 # Docker — stopping / cleaning
 # ---------------------------------------------------------------------------
 
-down: ## Stop containers (volumes preserved)
+down: ## Stop containers — data in ./data/ is ALWAYS preserved (use this for normal shutdown)
 	docker compose down
 
-down-volumes: ## Stop containers AND delete all data volumes (DESTRUCTIVE)
-	@echo "⚠️  Deleting all local data in 5 seconds. Ctrl+C to abort."
+down-volumes: ## DESTRUCTIVE — stop containers + wipe ALL data (bind mounts in ./data/ still safe)
+	@echo ""
+	@echo "  ⚠️  WARNING: This will delete Docker named volumes (ollama model weights)."
+	@echo "  Data in ./data/ (Postgres, Redis, Qdrant, n8n, OpenWebUI) is NOT deleted."
+	@echo "  Use 'make nuke' if you want to wipe everything including ./data/ directories."
+	@echo ""
+	@echo "  Proceeding in 5 seconds... Ctrl+C to abort."
 	@sleep 5
 	docker compose down -v
+
+nuke: ## FULL WIPE — stop containers + delete ALL data including ./data/ bind mounts
+	@echo ""
+	@echo "  ☠️  FULL DATA WIPE: This will delete ./data/ (Postgres, Redis, Qdrant, n8n, OpenWebUI)"
+	@echo "  AND all Docker named volumes (ollama models). ALL DATA WILL BE LOST."
+	@echo ""
+	@echo "  Proceeding in 10 seconds... Ctrl+C to abort."
+	@sleep 10
+	docker compose down -v
+	rm -rf data/postgres data/redis data/qdrant data/n8n data/openwebui
+	@echo "  All data wiped."
+
+backup: ## Back up all persistent data to ./backups/tantra-YYYY-MM-DD-HH-MM/
+	@BACKUP_DIR="backups/tantra-$$(date +%Y-%m-%d-%H-%M)"; \
+	mkdir -p "$$BACKUP_DIR"; \
+	echo "  $(CYAN)Backing up Postgres...$(RESET)"; \
+	docker compose exec -T postgres pg_dumpall -U $${POSTGRES_USER:-tantra} > "$$BACKUP_DIR/postgres-all.sql"; \
+	echo "  $(CYAN)Backing up Redis (AOF snapshot)...$(RESET)"; \
+	docker compose exec -T redis redis-cli -a $${REDIS_PASSWORD:-tantradevtestkey} BGSAVE; \
+	sleep 2; \
+	cp -r data/redis "$$BACKUP_DIR/redis" 2>/dev/null || true; \
+	echo "  $(CYAN)Copying n8n config...$(RESET)"; \
+	cp -r data/n8n "$$BACKUP_DIR/n8n" 2>/dev/null || true; \
+	echo "  $(CYAN)Copying OpenWebUI data...$(RESET)"; \
+	cp -r data/openwebui "$$BACKUP_DIR/openwebui" 2>/dev/null || true; \
+	echo "  $(GREEN)✓ Backup complete: $$BACKUP_DIR$(RESET)"; \
+	du -sh "$$BACKUP_DIR"
+
+restore: ## Restore Postgres from latest backup (USAGE: make restore BACKUP=backups/tantra-YYYY-MM-DD-HH-MM)
+	@if [ -z "$(BACKUP)" ]; then echo "Usage: make restore BACKUP=backups/tantra-YYYY-MM-DD-HH-MM"; exit 1; fi
+	@echo "  $(CYAN)Restoring Postgres from $(BACKUP)/postgres-all.sql...$(RESET)"
+	docker compose exec -T postgres psql -U $${POSTGRES_USER:-tantra} -d postgres < "$(BACKUP)/postgres-all.sql"
+	@echo "  $(GREEN)✓ Restore complete. Restart services: make restart$(RESET)"
 
 restart: ## Restart all containers
 	docker compose restart
