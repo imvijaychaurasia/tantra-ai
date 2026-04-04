@@ -35,15 +35,10 @@ networks:
       config:
         - subnet: 172.28.0.0/16
 
-volumes:
-  # All stateful services use bind mounts (./data/<service>/) so that:
-  #   • Data survives 'docker compose down -v' (bind mounts are NOT deleted by -v)
-  #   • Data is at a known host path — easy to back up with 'make backup'
-  #   • Data is visible and inspectable directly on the host filesystem
-  #   • Machine reboots / Docker daemon restarts cannot lose data
-  #
-  # Ollama is now also a bind mount at ./data/ollama/
-  # This ensures 10-30 GB of downloaded model weights survive any Docker operation.
+# All stateful services use bind mounts (./data/<service>/) — no named volumes.
+# Bind mounts survive 'docker compose down -v', volume prunes, and daemon restarts.
+# Layout: data/postgres/pgdata  data/redis  data/qdrant  data/ollama
+#         data/n8n  data/openwebui  data/media  data/uploads
 
 # =============================================================================
 services:
