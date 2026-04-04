@@ -169,6 +169,14 @@ def generate_youtube_script(agent_task_id: str) -> dict[str, Any]:
             crew_result = crew.kickoff()
             raw_output = str(crew_result.raw if hasattr(crew_result, "raw") else crew_result)
 
+            # Extract SEO task intermediate output for merger fallback (task index 2)
+            seo_raw = ""
+            try:
+                if hasattr(crew_result, "tasks_output") and len(crew_result.tasks_output) >= 3:
+                    seo_raw = str(getattr(crew_result.tasks_output[2], "raw", ""))
+            except Exception as _e:
+                logger.debug("Could not extract SEO task output: %s", _e)
+
             # ── Step 4: Checkpoint raw output ─────────────────────────────────
             _save_script_checkpoint(agent_task_id, {"raw_output": raw_output})
 
@@ -180,7 +188,12 @@ def generate_youtube_script(agent_task_id: str) -> dict[str, Any]:
                     f"Raw output (first 500 chars): {raw_output[:500]}"
                 )
 
-            # Update checkpoint with parsed data
+            # Fill any metadata keys the quality reviewer omitted using the
+            # SEO optimizer's intermediate output as a fallback source.
+            if seo_raw:
+                script_data = _fill_missing_seo_fields(script_data, seo_raw)
+
+            # Update checkpoint with parsed + merged data
             _save_script_checkpoint(agent_task_id, script_data)
 
         else:
@@ -408,6 +421,99 @@ def _get_channel_context(session) -> str:
         "Building Tantra AI — a fully local autonomous agent stack. "
         "Audience: engineers, founders, AI practitioners building in public."
     )
+
+
+# ---------------------------------------------------------------------------
+# SEO merger fallback
+# ---------------------------------------------------------------------------
+
+def _fill_missing_seo_fields(script_data: dict, seo_raw: str) -> dict:
+    """
+    If the quality reviewer's JSON is missing tags / description / thumbnail_prompt,
+    attempt to extract them from the SEO optimizer's raw text output.
+
+    The SEO optimizer produces structured text like:
+      1. Title: ...
+      2. Description: [multi-line block]
+      3. Tags: tag1, tag2, tag3, ...
+      4. Thumbnail concept: ...
+      5. Thumbnail prompt: ...
+      6. Hook: ...
+
+    This is a best-effort extraction — if a field cannot be reliably extracted
+    it is left empty (already the default). A warning is logged for each miss.
+    """
+    import re
+
+    needed = {
+        "tags": not script_data.get("tags"),
+        "description": not script_data.get("description"),
+        "thumbnail_prompt": not script_data.get("thumbnail_prompt"),
+        "thumbnail_concept": not script_data.get("thumbnail_concept"),
+    }
+    if not any(needed.values()):
+        return script_data  # nothing to fill
+
+    logger.warning(
+        "YouTubeCrew: quality reviewer omitted fields %s — attempting SEO fallback merge",
+        [k for k, v in needed.items() if v],
+    )
+
+    # ── tags ──────────────────────────────────────────────────────────────────
+    if needed["tags"]:
+        # Look for a line starting with "Tags:" or "3." followed by comma-separated terms
+        tags_match = re.search(
+            r"(?:^|\n)\s*(?:3\.|Tags?:)\s*(.+?)(?:\n|$)",
+            seo_raw, re.IGNORECASE
+        )
+        if tags_match:
+            raw_tags = tags_match.group(1).strip()
+            tags = [t.strip().strip('"\'') for t in raw_tags.split(",") if t.strip()]
+            if tags:
+                script_data["tags"] = tags
+                logger.info("SEO fallback: filled tags (%d items)", len(tags))
+
+    # ── description ───────────────────────────────────────────────────────────
+    if needed["description"]:
+        # Description is a multi-line block after "Description:" or "2."
+        desc_match = re.search(
+            r"(?:^|\n)\s*(?:2\.|Description:)\s*\n?([\s\S]+?)(?:\n\s*(?:3\.|Tags?:|Thumbnail)|\Z)",
+            seo_raw, re.IGNORECASE
+        )
+        if desc_match:
+            desc = desc_match.group(1).strip()
+            if len(desc) > 50:
+                script_data["description"] = desc
+                logger.info("SEO fallback: filled description (%d chars)", len(desc))
+
+    # ── thumbnail_concept ─────────────────────────────────────────────────────
+    if needed["thumbnail_concept"]:
+        tc_match = re.search(
+            r"(?:^|\n)\s*(?:4\.|Thumbnail concept:)\s*(.+?)(?:\n|$)",
+            seo_raw, re.IGNORECASE
+        )
+        if tc_match:
+            script_data["thumbnail_concept"] = tc_match.group(1).strip()
+            logger.info("SEO fallback: filled thumbnail_concept")
+
+    # ── thumbnail_prompt ──────────────────────────────────────────────────────
+    if needed["thumbnail_prompt"]:
+        tp_match = re.search(
+            r"(?:^|\n)\s*(?:5\.|Thumbnail prompt:)\s*(.+?)(?:\n\s*(?:6\.|Hook:)|\Z)",
+            seo_raw, re.IGNORECASE | re.DOTALL
+        )
+        if tp_match:
+            prompt = tp_match.group(1).strip()
+            if len(prompt) > 20:
+                script_data["thumbnail_prompt"] = prompt
+                logger.info("SEO fallback: filled thumbnail_prompt (%d chars)", len(prompt))
+
+    # Log any still-missing fields after best-effort extraction
+    still_missing = [k for k, v in needed.items() if v and not script_data.get(k)]
+    if still_missing:
+        logger.warning("SEO fallback: could not extract %s from SEO output", still_missing)
+
+    return script_data
 
 
 # ---------------------------------------------------------------------------

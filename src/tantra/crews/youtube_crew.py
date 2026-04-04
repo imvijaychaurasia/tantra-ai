@@ -220,9 +220,12 @@ def build_youtube_crew(
             "You check that the hook grabs in the first 5 seconds, that each scene has "
             "a clear narration and visual prompt, that the CTA is specific and genuine, "
             "and that the thumbnail prompt will produce a compelling image. "
-            "Your final output is ALWAYS a valid JSON object — no markdown, no preamble."
+            "Your final output is ALWAYS a valid JSON object — no markdown, no preamble. "
+            "You MUST include ALL fields: title, duration_target_seconds, hook, scenes, "
+            "call_to_action, thumbnail_concept, thumbnail_prompt, description, and tags. "
+            "Copy description, tags, and thumbnail_prompt verbatim from the SEO Specialist's output."
         ),
-        llm=_make_llm(ModelTier.fast),
+        llm=_make_llm(ModelTier.worker),  # worker tier (14B) — fast (4B) truncates full JSON output
         max_iter=4,
         verbose=verbose,
         allow_delegation=False,
