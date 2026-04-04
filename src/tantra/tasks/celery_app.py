@@ -202,22 +202,39 @@ def on_worker_ready(**kwargs) -> None:
     Both operations are non-fatal: a failure here is logged but does not
     prevent the worker from starting.
     """
-    # ── 1. Ensure DB tables ────────────────────────────────────────────────
-    try:
-        from sqlalchemy import create_engine
-        from tantra.core.database import Base
-        import tantra.db          # registers Phase 1 models (ContentQueueItem, User, …)
-        import tantra.db.director # registers Phase 2 models (WeeklyPlan, AgentTask)
-        import tantra.db.social   # registers Phase 3 models (YouTubeVideo)
+    # ── 1. Ensure DB tables (with retry — Postgres may not be ready on machine restart) ──
+    import time as _time
 
-        engine = create_engine(settings.database_sync_url, echo=False)
-        Base.metadata.create_all(engine)
-        engine.dispose()
-        logger.info("Worker startup: DB tables ensured (create_all idempotent)")
-    except Exception as exc:
-        logger.warning(
-            f"Worker startup: DB table init failed (non-fatal): {exc}"
-        )
+    _max_attempts = 8
+    _backoff = [2, 4, 8, 15, 20, 30, 30, 30]  # seconds between attempts
+
+    for _attempt in range(1, _max_attempts + 1):
+        try:
+            from sqlalchemy import create_engine
+            from tantra.core.database import Base
+            import tantra.db          # registers Phase 1 models (ContentQueueItem, User, …)
+            import tantra.db.director # registers Phase 2 models (WeeklyPlan, AgentTask)
+            import tantra.db.social   # registers Phase 3 models (YouTubeVideo)
+
+            engine = create_engine(settings.database_sync_url, echo=False)
+            Base.metadata.create_all(engine)
+            engine.dispose()
+            logger.info("Worker startup: DB tables ensured (create_all idempotent, attempt %d)", _attempt)
+            break
+        except Exception as exc:
+            wait = _backoff[min(_attempt - 1, len(_backoff) - 1)]
+            if _attempt < _max_attempts:
+                logger.warning(
+                    "Worker startup: DB table init failed (attempt %d/%d), retrying in %ds: %s",
+                    _attempt, _max_attempts, wait, exc,
+                )
+                _time.sleep(wait)
+            else:
+                logger.error(
+                    "Worker startup: DB table init FAILED after %d attempts — "
+                    "tables may be missing. Run: docker compose restart celery-worker\n%s",
+                    _max_attempts, exc,
+                )
 
     # ── 2. Register live monitor callbacks ────────────────────────────────────
     # LiteLLM callback: captures every LLM API call across all crews/tasks.
