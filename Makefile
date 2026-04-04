@@ -9,13 +9,13 @@
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
 .PHONY: help up up-core up-dev up-all up-nvidia down down-volumes restart \
-        build push logs logs-api logs-worker ps \
+        build push logs logs-api logs-worker logs-media ps \
         setup install install-dev pull-models \
         db-init db-migrate db-revision db-shell db-reset \
-        redis-cli qdrant-ui webui n8n api-docs flower terminal \
+        redis-cli qdrant-ui webui n8n api-docs flower terminal media-ui \
         lint format typecheck test test-cov test-fast \
         validate clean nuke \
-        create-admin
+        create-admin create-media-dirs
 
 CYAN  := \033[0;36m
 GREEN := \033[0;32m
@@ -62,6 +62,7 @@ _open-links:
 	@echo "   Shell:       http://localhost:7681"
 	@echo "   Flower:      http://localhost:5555"
 	@echo "   LiteLLM:     http://localhost:4000"
+	@echo "   Media API:   http://localhost:8100/docs"
 
 # ---------------------------------------------------------------------------
 # Docker — stopping / cleaning
@@ -137,6 +138,9 @@ logs-worker: ## Tail celery worker logs
 
 logs-beat: ## Tail celery beat logs
 	docker compose logs -f celery-beat
+
+logs-media: ## Tail tantra-media logs (TTS + video production)
+	docker compose logs -f tantra-media
 
 ps: ## Show running containers with health status
 	docker compose ps
@@ -232,6 +236,13 @@ terminal: ## Open web terminal
 
 litellm: ## Open LiteLLM dashboard
 	open http://localhost:4000
+
+media-ui: ## Open tantra-media API docs
+	open http://localhost:8100/docs
+
+create-media-dirs: ## Create ./data/media/ subdirectories (run once after cloning)
+	mkdir -p data/media/audio data/media/images data/media/clips data/media/output
+	@echo "  $(GREEN)✓ data/media/ directories created$(RESET)"
 
 # ---------------------------------------------------------------------------
 # Validation

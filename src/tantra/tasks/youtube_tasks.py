@@ -293,16 +293,32 @@ def generate_youtube_script(agent_task_id: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# produce_youtube_video  (Phase 3b stub)
+# produce_youtube_video  (Phase 3b — tantra-media integration)
 # ---------------------------------------------------------------------------
 
 def produce_youtube_video(youtube_video_id: str) -> dict[str, Any]:
     """
-    Call tantra-media API to produce TTS + video/images + thumbnail → final MP4.
+    Call tantra-media HTTP API to produce TTS + slide images + final MP4.
 
-    Phase 3b implementation. Currently a stub that marks the video as 'failed'
-    with a clear message that tantra-media is not yet implemented.
+    Pipeline (delegated to tantra-media container):
+      1. edge-tts narration per scene → audio/{video_id}/scene_N.mp3
+      2. Pillow dark-slide image per scene → images/{video_id}/scene_N.png
+      3. ffmpeg: image + audio → clips/{video_id}/scene_N.mp4
+      4. Pillow thumbnail → images/{video_id}/thumbnail.png
+      5. ffmpeg concat → output/{video_id}.mp4
+
+    DB state machine:
+      approved → producing → produced
+                          → failed (on error)
+
+    This task is idempotent: if output files already exist and status is
+    'produced', it returns success without re-calling tantra-media.
+
+    Timeout: tantra-media /produce is synchronous and can take up to 15 min
+    for a long video. The Celery soft_time_limit is set to 30 minutes.
     """
+    import httpx
+    from tantra.core.config import settings
     from tantra.db.social import YouTubeVideo
 
     session = _make_session()
@@ -311,24 +327,124 @@ def produce_youtube_video(youtube_video_id: str) -> dict[str, Any]:
         if not video:
             return {"success": False, "error": f"YouTubeVideo {youtube_video_id} not found"}
 
+        # Idempotency: if already produced, return success
+        if video.status == "produced":
+            logger.info("produce_youtube_video: video %s already produced, skipping", youtube_video_id)
+            return {
+                "success": True,
+                "skipped": True,
+                "reason": "already produced",
+                "youtube_video_id": youtube_video_id,
+                "video_path": video.video_path,
+            }
+
         if video.status != "approved":
             return {
                 "success": False,
-                "error": f"Expected status 'approved', got '{video.status}'",
+                "error": f"Expected status 'approved' or 'produced', got '{video.status}'",
             }
 
-        # Phase 3b not yet implemented
-        logger.warning(
-            "produce_youtube_video called but tantra-media not yet implemented. "
-            "Video %s will remain in 'approved' status until Phase 3b ships.",
-            youtube_video_id,
-        )
-        return {
-            "success": False,
-            "skipped": True,
-            "reason": "tantra-media service not yet implemented (Phase 3b)",
-            "youtube_video_id": youtube_video_id,
+        if not video.script:
+            return {"success": False, "error": "No script JSON on YouTubeVideo row — cannot produce"}
+
+        # ── Mark as producing ─────────────────────────────────────────────
+        video.status = "producing"
+        session.commit()
+        logger.info("produce_youtube_video: video %s → producing", youtube_video_id)
+
+        # ── Call tantra-media /produce ─────────────────────────────────────
+        media_url = getattr(settings, "tantra_media_url", "http://tantra-media:8100")
+        produce_url = f"{media_url}/produce"
+
+        payload = {
+            "video_id": youtube_video_id,
+            "script": video.script,
+            "force_regen": False,
         }
+
+        logger.info("produce_youtube_video: calling %s (video_id=%s, scenes=%d)",
+                    produce_url, youtube_video_id, len(video.script.get("scenes", [])))
+
+        try:
+            # Long timeout — production can take 5-15 minutes for a multi-scene video
+            with httpx.Client(timeout=httpx.Timeout(connect=30, read=1800, write=60, pool=60)) as client:
+                resp = client.post(produce_url, json=payload)
+                resp.raise_for_status()
+                result = resp.json()
+        except httpx.ConnectError as exc:
+            error_msg = (
+                f"Cannot connect to tantra-media at {media_url}. "
+                f"Is the service running? Run: docker compose up -d tantra-media. "
+                f"Original error: {exc}"
+            )
+            logger.error("produce_youtube_video: %s", error_msg)
+            video.status = "failed"
+            video.error_message = error_msg[:1000]
+            session.commit()
+            return {"success": False, "error": error_msg}
+        except httpx.HTTPStatusError as exc:
+            error_msg = f"tantra-media returned HTTP {exc.response.status_code}: {exc.response.text[:500]}"
+            logger.error("produce_youtube_video: %s", error_msg)
+            video.status = "failed"
+            video.error_message = error_msg[:1000]
+            session.commit()
+            return {"success": False, "error": error_msg}
+        except Exception as exc:
+            error_msg = f"tantra-media call failed: {exc}"
+            logger.error("produce_youtube_video: %s", error_msg, exc_info=True)
+            video.status = "failed"
+            video.error_message = error_msg[:1000]
+            session.commit()
+            return {"success": False, "error": error_msg}
+
+        # ── Handle response ───────────────────────────────────────────────
+        if not result.get("success"):
+            error_msg = result.get("error", "tantra-media returned success=false")
+            logger.error("produce_youtube_video: production failed for %s: %s", youtube_video_id, error_msg)
+            video.status = "failed"
+            video.error_message = error_msg[:1000]
+            session.commit()
+            return {"success": False, "error": error_msg}
+
+        # ── Update DB with file paths ──────────────────────────────────────
+        # tantra-media returns paths relative to /data/media (bind-mounted from ./data/media/)
+        # Store the host-relative paths so the API can serve them
+        media_base = "/data/media"
+        video.video_path = f"{media_base}/{result['video_path']}" if result.get("video_path") else None
+        video.audio_path = f"{media_base}/{result['audio_path']}" if result.get("audio_path") else None
+        video.thumbnail_path = f"{media_base}/{result['thumbnail_path']}" if result.get("thumbnail_path") else None
+        video.status = "produced"
+        video.produced_at = datetime.utcnow()
+        session.commit()
+
+        logger.info(
+            "produce_youtube_video: ✓ video %s produced in %.0fs — %d scenes, %.0fs total",
+            youtube_video_id,
+            result.get("duration_seconds", 0),
+            result.get("scene_count", 0),
+            result.get("total_duration", 0),
+        )
+
+        return {
+            "success": True,
+            "youtube_video_id": youtube_video_id,
+            "video_path": video.video_path,
+            "thumbnail_path": video.thumbnail_path,
+            "scene_count": result.get("scene_count"),
+            "total_duration": result.get("total_duration"),
+            "production_time_seconds": result.get("duration_seconds"),
+        }
+
+    except Exception as exc:
+        logger.error("produce_youtube_video: unexpected error for %s: %s", youtube_video_id, exc, exc_info=True)
+        try:
+            if video and video.status == "producing":
+                video.status = "failed"
+                video.error_message = str(exc)[:1000]
+                session.commit()
+        except Exception:
+            pass
+        return {"success": False, "error": str(exc)}
 
     finally:
         session.close()

@@ -133,6 +133,10 @@ class Settings(BaseSettings):
     # Set N8N_YOUTUBE_SCRIPT_WEBHOOK in .env after importing the workflow into n8n
     n8n_youtube_script_webhook: Optional[str] = None
 
+    # ── tantra-media (Phase 3b) ───────────────────────────────────────────────
+    # Internal Docker network URL for the TTS + video assembly microservice
+    tantra_media_url: str = "http://tantra-media:8100"
+
     # ── YouTube / Google Data API ─────────────────────────────────────────────
     youtube_api_key: Optional[SecretStr] = None
     youtube_client_id: Optional[str] = None

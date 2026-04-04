@@ -982,23 +982,53 @@ async def approve_youtube_script(
     video.approved_at = datetime.utcnow()
     await db.commit()
 
-    # Phase 3b: queue produce task
-    # For now, log that production is pending Phase 3b
+    # Phase 3b: queue a youtube_produce AgentTask → Celery will call produce_youtube_video
     import logging
     _logger = logging.getLogger(__name__)
-    _logger.info(
-        "YouTube script approved: video_id=%s title=%r approved_by=%s. "
-        "Production pipeline (Phase 3b) not yet implemented — video stays in 'approved'.",
-        str(video_id), video.title, body.approved_by,
-    )
+
+    produce_task_id: str | None = None
+    try:
+        from tantra.db.director import AgentTask as _AgentTask
+        from tantra.tasks.celery_app import celery_app
+
+        # Create AgentTask row to track production
+        produce_task = _AgentTask(
+            task_type="youtube_produce",
+            status="pending",
+            instructions=f"Produce video: {video.title or str(video_id)}",
+            context={"youtube_video_id": str(video_id)},
+            plan_id=video.plan_id,
+        )
+        db.add(produce_task)
+        await db.commit()
+        await db.refresh(produce_task)
+        produce_task_id = str(produce_task.id)
+
+        # Dispatch Celery task
+        celery_app.send_task(
+            "tantra.tasks.director.execute_agent_task",
+            args=[produce_task_id],
+            queue="default",
+        )
+        _logger.info(
+            "YouTube script approved: video_id=%s title=%r — queued produce task %s",
+            str(video_id), video.title, produce_task_id,
+        )
+    except Exception as exc:
+        _logger.error(
+            "YouTube approve: failed to queue produce task for video %s: %s",
+            str(video_id), exc, exc_info=True,
+        )
+        # Don't fail the approval — video is approved, production can be retried manually
 
     return JSONResponse({
         "success": True,
         "video_id": str(video_id),
         "status": "approved",
+        "produce_task_id": produce_task_id,
         "message": (
-            "Script approved. Video queued for production when Phase 3b "
-            "tantra-media service is deployed."
+            "Script approved. Production queued — tantra-media will generate "
+            "TTS narration, slide images, and the final MP4."
         ),
         "approved_by": body.approved_by,
     })

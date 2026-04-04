@@ -427,6 +427,44 @@ services:
       tantra-net:
         ipv4_address: 172.28.0.41
 
+  # ---------------------------------------------------------------------------
+  # 13. TANTRA-MEDIA — TTS + Slide image gen + ffmpeg video assembly (Phase 3b)
+  #     Access: http://localhost:8100
+  #     API docs: http://localhost:8100/docs
+  #
+  #     Pipeline:
+  #       POST /produce  → edge-tts narration + Pillow slides + ffmpeg MP4
+  #
+  #     Output files:  ./data/media/ (bind-mounted)
+  #       audio/{video_id}/scene_N.mp3
+  #       images/{video_id}/scene_N.png  + thumbnail.png
+  #       clips/{video_id}/scene_N.mp4
+  #       output/{video_id}.mp4
+  # ---------------------------------------------------------------------------
+  tantra-media:
+    <<: *restart
+    build:
+      context: ./tantra-media
+      dockerfile: Dockerfile
+    container_name: tantra-media
+    volumes:
+      - ./data/media:/data/media          # output files persisted on host
+    ports:
+      - "${TANTRA_MEDIA_PORT:-8100}:8100"
+    environment:
+      TANTRA_MEDIA_DIR: /data/media
+      TANTRA_MEDIA_VOICE: ${TANTRA_MEDIA_VOICE:-en-US-GuyNeural}
+      TANTRA_MEDIA_SPEECH_RATE: ${TANTRA_MEDIA_SPEECH_RATE:-+5%}
+    networks:
+      tantra-net:
+        ipv4_address: 172.28.0.50
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8100/health')\" 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
 # =============================================================================
 # NVIDIA GPU override (Linux only):
 # docker compose -f docker-compose.yml -f docker-compose.nvidia.yml up -d

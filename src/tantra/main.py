@@ -17,7 +17,7 @@ import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from tantra.core.config import settings
 from tantra.core.database import close_db, init_db
@@ -179,6 +179,12 @@ _register_app_routes()
 @app.get("/health", tags=["system"], include_in_schema=False)
 async def health() -> JSONResponse:
     return JSONResponse({"status": "ok", "service": "tantra-api", "version": "0.1.0"})
+
+
+@app.get("/monitor", tags=["system"], include_in_schema=False)
+async def monitor_redirect() -> RedirectResponse:
+    """Convenience redirect — /monitor → /api/v1/monitor (live dashboard)."""
+    return RedirectResponse(url="/api/v1/monitor", status_code=302)
 
 
 @app.get("/", tags=["system"], include_in_schema=False)

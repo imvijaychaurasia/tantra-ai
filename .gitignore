@@ -59,6 +59,11 @@ data/n8n/
 data/openwebui/
 data/models/
 data/uploads/
+# tantra-media output (large media files — never commit)
+data/media/audio/
+data/media/images/
+data/media/clips/
+data/media/output/
 
 # Ollama model cache
 *.gguf

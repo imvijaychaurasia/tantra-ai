@@ -1734,6 +1734,109 @@ def director_sessions(
 
 
 # ---------------------------------------------------------------------------
+# media — tantra-media microservice commands (Phase 3b)
+# ---------------------------------------------------------------------------
+
+
+@app.command()
+def media_status(
+    api_url: str = typer.Option("http://localhost:8000", "--api", envvar="TANTRA_API_URL"),
+) -> None:
+    """Check tantra-media service health and show produced videos."""
+    import httpx
+
+    console.print("[bold cyan]tantra-media status[/bold cyan]")
+
+    # Health check via tantra-api proxied health, or direct
+    media_url = "http://localhost:8100"
+    try:
+        resp = httpx.get(f"{media_url}/health", timeout=5)
+        data = resp.json()
+        console.print(f"  Service:    [green]online[/green]  ({media_url})")
+        console.print(f"  Media dir:  {data.get('media_dir', '?')}")
+        console.print(f"  Dir exists: {data.get('media_dir_exists', '?')}")
+    except httpx.ConnectError:
+        console.print(f"  Service:    [red]offline[/red] — run: docker compose up -d tantra-media")
+        return
+    except Exception as exc:
+        console.print(f"  Service:    [red]error[/red] — {exc}")
+        return
+
+    # Show videos in produced/producing status
+    try:
+        resp = httpx.get(f"{api_url}/api/v1/youtube/videos?status=produced", timeout=10)
+        if resp.status_code == 200:
+            videos = resp.json().get("videos", [])
+            if videos:
+                console.print(f"\n  [bold]Produced videos ({len(videos)}):[/bold]")
+                for v in videos[:5]:
+                    console.print(f"    {v['id'][:8]}  {v.get('title', '?')[:50]}")
+            else:
+                console.print("  No produced videos yet.")
+    except Exception:
+        pass
+
+
+@app.command()
+def media_produce(
+    video_id: str = typer.Argument(..., help="YouTubeVideo UUID to produce"),
+    force: bool = typer.Option(False, "--force", "-f", help="Regenerate even if files exist"),
+    api_url: str = typer.Option("http://localhost:8000", "--api", envvar="TANTRA_API_URL"),
+) -> None:
+    """
+    Manually trigger production of a YouTube video via tantra-media.
+
+    This enqueues a youtube_produce AgentTask. The video must be in 'approved' status.
+    The Celery worker will call tantra-media to generate TTS + slides + MP4.
+
+    Examples:
+      tantra media-produce <video-uuid>
+      tantra media-produce <video-uuid> --force
+    """
+    import httpx
+
+    console.print(f"[cyan]Triggering production for video {video_id}...[/cyan]")
+
+    # POST to approve endpoint if video is in scripted state, otherwise
+    # create a youtube_produce task directly
+    try:
+        resp = httpx.get(f"{api_url}/api/v1/youtube/videos/{video_id}", timeout=10)
+        if resp.status_code == 404:
+            console.print(f"[red]Video {video_id} not found[/red]")
+            raise typer.Exit(1)
+        video = resp.json()
+        status = video.get("status", "?")
+        title = video.get("title", "?")
+        console.print(f"  Video:  [bold]{title}[/bold]")
+        console.print(f"  Status: {status}")
+
+        if status == "produced" and not force:
+            console.print("[yellow]Already produced. Use --force to regenerate.[/yellow]")
+            raise typer.Exit(0)
+
+        if status not in ("approved", "produced", "failed"):
+            console.print(f"[red]Cannot produce from status '{status}'. Video must be in approved/produced/failed.[/red]")
+            raise typer.Exit(1)
+
+        # Dispatch via task run
+        import subprocess
+        result = subprocess.run(
+            ["tantra", "task", "run", "youtube_produce",
+             "--context", f"youtube_video_id={video_id}"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            console.print("[green]✓ Production task queued.[/green]")
+            console.print("[dim]Monitor with: tantra monitor --filter task[/dim]")
+        else:
+            console.print(f"[red]Failed to queue task:[/red] {result.stderr}")
+
+    except httpx.ConnectError:
+        console.print(f"[red]Cannot connect to API at {api_url}[/red]")
+        raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
 # monitor — live stream of agent/model events
 # ---------------------------------------------------------------------------
 
