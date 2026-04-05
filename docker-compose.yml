@@ -248,6 +248,7 @@ services:
     volumes:
       - ./src:/app/src:ro
       - ./skills:/app/skills:ro
+      - ./data/media:/data/media    # upload_youtube_video reads MP4 files produced by tantra-media
     env_file: .env
     environment:
       PYTHONPATH: /app/src

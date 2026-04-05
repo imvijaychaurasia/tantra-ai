@@ -142,6 +142,12 @@ class Settings(BaseSettings):
     youtube_client_id: Optional[str] = None
     youtube_client_secret: Optional[SecretStr] = None
     youtube_redirect_uri: str = "http://localhost:8000/api/v1/auth/youtube/callback"
+    # OAuth2 refresh token — obtained once via scripts/youtube_oauth_setup.py
+    # Add YOUTUBE_REFRESH_TOKEN=<token> to .env after running the setup script
+    youtube_refresh_token: Optional[SecretStr] = None
+    # Upload defaults (can be overridden per video in future)
+    youtube_upload_privacy: str = "public"      # public | private | unlisted
+    youtube_upload_category_id: str = "28"      # 28 = Science & Technology
 
     # ── Email (for password reset + verification) ─────────────────────────────
     smtp_host: Optional[str] = None

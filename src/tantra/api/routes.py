@@ -1071,6 +1071,78 @@ async def reject_youtube_script(
     })
 
 
+@router.post("/youtube/{video_id}/upload", tags=["youtube"])
+async def trigger_youtube_upload(
+    video_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db_dep),
+) -> JSONResponse:
+    """
+    Manually trigger upload of a produced YouTube video to the YouTube Data API.
+
+    Phase 3c — queues upload_youtube_video Celery task.
+
+    Prerequisites:
+      - Video must be in 'produced' status
+      - YOUTUBE_REFRESH_TOKEN must be set in .env
+        (run: python scripts/youtube_oauth_setup.py)
+
+    The task transitions the video: produced → uploading → live
+    Monitor progress via GET /youtube/{video_id} or Flower at :5555.
+    """
+    import logging as _logging
+    from tantra.db.social import YouTubeVideo
+
+    _logger = _logging.getLogger(__name__)
+
+    video = await db.get(YouTubeVideo, video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail=f"YouTubeVideo {video_id} not found")
+
+    if video.status != "produced":
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot upload video in status '{video.status}'. "
+                "Expected: produced. "
+                "Approve and produce the video first."
+            ),
+        )
+
+    celery_task_id: str | None = None
+    try:
+        from tantra.tasks.celery_app import celery_app
+
+        # Dispatch upload task directly (no AgentTask wrapper — it's a short terminal operation)
+        result = celery_app.send_task(
+            "tantra.tasks.youtube.upload_youtube_video",
+            args=[str(video_id)],
+            queue="default",
+        )
+        celery_task_id = result.id
+        _logger.info(
+            "YouTube upload queued: video_id=%s title=%r celery_task=%s",
+            str(video_id), video.title, celery_task_id,
+        )
+    except Exception as exc:
+        _logger.error(
+            "Failed to queue upload task for video %s: %s", str(video_id), exc, exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=f"Failed to queue upload task: {exc}")
+
+    return JSONResponse({
+        "success": True,
+        "video_id": str(video_id),
+        "title": video.title,
+        "status": "uploading (queued)",
+        "celery_task_id": celery_task_id,
+        "message": (
+            "Upload task queued. The video will be uploaded to YouTube and "
+            "status will transition to 'live' on success. "
+            "Monitor at http://localhost:5555 (Flower) or poll GET /youtube/{video_id}."
+        ),
+    })
+
+
 # ---------------------------------------------------------------------------
 # Live Monitor — WebSocket + HTML dashboard
 # ---------------------------------------------------------------------------

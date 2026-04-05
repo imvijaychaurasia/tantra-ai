@@ -1,15 +1,13 @@
 """
-Tantra AI — YouTube Celery Tasks (Phase 3a)
+Tantra AI — YouTube Celery Tasks (Phase 3a / 3b / 3c)
 
 Task registry:
-  tantra.tasks.youtube.generate_youtube_script  — Run YouTubeCrew → script → n8n approval
+  tantra.tasks.youtube.generate_youtube_script  — Run YouTubeCrew → script → n8n approval (Phase 3a)
   tantra.tasks.youtube.produce_youtube_video     — tantra-media API → MP4 (Phase 3b)
-  tantra.tasks.youtube.upload_youtube_video      — YouTube Data API upload (Phase 3c)
+  tantra.tasks.youtube.upload_youtube_video      — YouTube Data API v3 resumable upload (Phase 3c)
   tantra.tasks.youtube.update_youtube_metadata   — Update title/desc/tags post-upload
 
-Phase 3a implements generate_youtube_script fully.
-produce_youtube_video and upload_youtube_video are stubs that will be
-filled in Phase 3b and 3c respectively.
+All three phases are fully implemented.
 
 Resilience:
   generate_youtube_script checkpoints the expensive YouTubeCrew output to Redis
@@ -451,40 +449,278 @@ def produce_youtube_video(youtube_video_id: str) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
-# upload_youtube_video  (Phase 3c stub)
+# upload_youtube_video  (Phase 3c — YouTube Data API v3)
 # ---------------------------------------------------------------------------
 
 def upload_youtube_video(youtube_video_id: str) -> dict[str, Any]:
     """
     Upload produced MP4 to YouTube via Data API v3.
 
-    Phase 3c implementation. Currently a stub.
+    Prerequisites:
+      - YOUTUBE_CLIENT_ID, YOUTUBE_CLIENT_SECRET in .env
+      - YOUTUBE_REFRESH_TOKEN in .env  (run scripts/youtube_oauth_setup.py once)
+      - celery-worker has ./data/media:/data/media bind-mount
+
+    DB state machine:
+      produced → uploading → live
+                           → failed (on error, reverts to 'produced' for retry)
+
+    Idempotent: if video is already 'live', returns success immediately.
+
+    The upload uses the YouTube Data API v3 resumable upload protocol with
+    8 MB chunks and automatic retry on transient HTTP 5xx errors (up to 5 retries
+    with exponential back-off). A 10-minute timeout covers videos up to ~1 GB.
     """
+    import os
+    import time
+
+    from tantra.core.config import settings
     from tantra.db.social import YouTubeVideo
 
     session = _make_session()
+    video = None
     try:
         video = session.get(YouTubeVideo, uuid.UUID(youtube_video_id))
         if not video:
             return {"success": False, "error": f"YouTubeVideo {youtube_video_id} not found"}
 
+        # ── Idempotency ────────────────────────────────────────────────────────
+        if video.status == "live":
+            logger.info("upload_youtube_video: %s already live, skipping", youtube_video_id)
+            return {
+                "success": True,
+                "skipped": True,
+                "reason": "already live",
+                "youtube_video_id": youtube_video_id,
+                "youtube_url": video.youtube_url,
+            }
+
         if video.status != "produced":
             return {
                 "success": False,
-                "error": f"Expected status 'produced', got '{video.status}'",
+                "error": (
+                    f"Expected status 'produced', got '{video.status}'. "
+                    "Video must be in 'produced' state before uploading."
+                ),
             }
 
-        logger.warning(
-            "upload_youtube_video called but not yet implemented (Phase 3c). "
-            "Video %s will remain in 'produced' status.",
-            youtube_video_id,
+        # ── Validate credentials ───────────────────────────────────────────────
+        if not settings.youtube_client_id or not settings.youtube_client_secret:
+            return {
+                "success": False,
+                "error": (
+                    "YouTube OAuth not configured. "
+                    "Set YOUTUBE_CLIENT_ID and YOUTUBE_CLIENT_SECRET in .env "
+                    "then run: python scripts/youtube_oauth_setup.py"
+                ),
+            }
+
+        refresh_token = (
+            settings.youtube_refresh_token.get_secret_value()
+            if settings.youtube_refresh_token
+            else None
         )
-        return {
-            "success": False,
-            "skipped": True,
-            "reason": "YouTube upload not yet implemented (Phase 3c)",
-            "youtube_video_id": youtube_video_id,
+        if not refresh_token:
+            return {
+                "success": False,
+                "error": (
+                    "YOUTUBE_REFRESH_TOKEN not set. "
+                    "Run: python scripts/youtube_oauth_setup.py  "
+                    "then add YOUTUBE_REFRESH_TOKEN=<token> to .env"
+                ),
+            }
+
+        # ── Validate video file ────────────────────────────────────────────────
+        if not video.video_path:
+            return {"success": False, "error": "No video_path on YouTubeVideo row — re-run produce_youtube_video"}
+
+        video_file = video.video_path   # e.g. /data/media/output/{id}.mp4
+        if not os.path.isfile(video_file):
+            return {
+                "success": False,
+                "error": (
+                    f"Video file not found: {video_file}. "
+                    "Ensure celery-worker has ./data/media:/data/media mounted "
+                    "and re-run produce_youtube_video if the file is missing."
+                ),
+            }
+
+        file_size_mb = os.path.getsize(video_file) / (1024 * 1024)
+        logger.info(
+            "upload_youtube_video: %s → uploading (%.1f MB from %s)",
+            youtube_video_id, file_size_mb, video_file,
+        )
+
+        # ── Import Google API client ───────────────────────────────────────────
+        try:
+            from google.oauth2.credentials import Credentials
+            from google.auth.transport.requests import Request
+            from googleapiclient.discovery import build
+            from googleapiclient.errors import HttpError
+            from googleapiclient.http import MediaFileUpload
+        except ImportError as exc:
+            return {
+                "success": False,
+                "error": (
+                    f"google-api-python-client not installed: {exc}. "
+                    "Run: pip install google-api-python-client google-auth"
+                ),
+            }
+
+        # ── Mark as uploading ──────────────────────────────────────────────────
+        video.status = "uploading"
+        session.commit()
+
+        # ── Build OAuth2 credentials ───────────────────────────────────────────
+        # We use an offline refresh token — the client library auto-refreshes
+        # the access token as needed without any user interaction.
+        creds = Credentials(
+            token=None,
+            refresh_token=refresh_token,
+            client_id=settings.youtube_client_id,
+            client_secret=settings.youtube_client_secret.get_secret_value(),
+            token_uri="https://oauth2.googleapis.com/token",
+            scopes=[
+                "https://www.googleapis.com/auth/youtube.upload",
+                "https://www.googleapis.com/auth/youtube",
+            ],
+        )
+        # Force a token refresh before upload to catch auth errors early
+        creds.refresh(Request())
+
+        youtube = build("youtube", "v3", credentials=creds, cache_discovery=False)
+
+        # ── Build video metadata ───────────────────────────────────────────────
+        tags = list(video.tags or [])
+        # YouTube enforces a 500-character limit on the tags array joined by commas
+        tag_budget = 500
+        selected_tags: list[str] = []
+        for tag in tags:
+            if tag_budget - len(tag) - 1 >= 0:
+                selected_tags.append(tag)
+                tag_budget -= len(tag) + 1
+            else:
+                break
+
+        body = {
+            "snippet": {
+                "title": (video.title or "Tantra AI — Local Autonomous Agent Stack")[:100],
+                "description": (video.description or "")[:5000],
+                "tags": selected_tags,
+                "categoryId": settings.youtube_upload_category_id,
+                "defaultLanguage": "en",
+            },
+            "status": {
+                "privacyStatus": settings.youtube_upload_privacy,
+                "selfDeclaredMadeForKids": False,
+                "embeddable": True,
+            },
         }
+
+        # ── Resumable upload with retry ────────────────────────────────────────
+        media = MediaFileUpload(
+            video_file,
+            mimetype="video/mp4",
+            resumable=True,
+            chunksize=8 * 1024 * 1024,   # 8 MB chunks
+        )
+
+        insert_request = youtube.videos().insert(
+            part="snippet,status",
+            body=body,
+            media_body=media,
+        )
+
+        response = None
+        retry_count = 0
+        max_retries = 5
+        retriable_statuses = {500, 502, 503, 504}
+
+        logger.info("upload_youtube_video: starting resumable upload for %s", youtube_video_id)
+
+        while response is None:
+            try:
+                upload_status, response = insert_request.next_chunk()
+                if upload_status:
+                    pct = int(upload_status.progress() * 100)
+                    logger.info(
+                        "upload_youtube_video: %s — %d%% uploaded",
+                        youtube_video_id, pct,
+                    )
+            except HttpError as exc:
+                if exc.resp.status in retriable_statuses and retry_count < max_retries:
+                    retry_count += 1
+                    wait = 2 ** retry_count
+                    logger.warning(
+                        "upload_youtube_video: HTTP %d (retry %d/%d in %ds) for %s",
+                        exc.resp.status, retry_count, max_retries, wait, youtube_video_id,
+                    )
+                    time.sleep(wait)
+                    continue
+                # Non-retriable error or max retries exceeded
+                error_msg = f"YouTube API error {exc.resp.status}: {exc.content[:500]!r}"
+                logger.error("upload_youtube_video: %s for %s", error_msg, youtube_video_id)
+                video.status = "failed"
+                video.error_message = error_msg[:1000]
+                session.commit()
+                return {"success": False, "error": error_msg}
+            except Exception as exc:
+                error_msg = f"Upload failed mid-stream: {exc}"
+                logger.error("upload_youtube_video: %s for %s", error_msg, youtube_video_id, exc_info=True)
+                video.status = "failed"
+                video.error_message = error_msg[:1000]
+                session.commit()
+                return {"success": False, "error": error_msg}
+
+        # ── Upload complete — store result ─────────────────────────────────────
+        yt_video_id = response.get("id", "")
+        yt_url = f"https://www.youtube.com/watch?v={yt_video_id}" if yt_video_id else ""
+
+        video.youtube_video_id = yt_video_id
+        video.youtube_url = yt_url
+        video.status = "live"
+        video.uploaded_at = datetime.utcnow()
+        session.commit()
+
+        logger.info(
+            "upload_youtube_video: ✓ %s is LIVE — %s (%.1f MB uploaded)",
+            youtube_video_id, yt_url, file_size_mb,
+        )
+
+        # ── Monitor event ──────────────────────────────────────────────────────
+        try:
+            from tantra.core.monitor import MonitorEmitter
+            MonitorEmitter.task_end(
+                "youtube_upload", youtube_video_id,
+                yt_video_id=yt_video_id,
+                yt_url=yt_url,
+                file_size_mb=round(file_size_mb, 1),
+            )
+        except Exception:
+            pass
+
+        return {
+            "success": True,
+            "youtube_video_id": youtube_video_id,
+            "yt_video_id": yt_video_id,
+            "youtube_url": yt_url,
+            "file_size_mb": round(file_size_mb, 1),
+        }
+
+    except Exception as exc:
+        logger.error(
+            "upload_youtube_video: unexpected error for %s: %s",
+            youtube_video_id, exc, exc_info=True,
+        )
+        try:
+            if video and video.status == "uploading":
+                # Roll back to "produced" so the operator can retry
+                video.status = "produced"
+                video.error_message = str(exc)[:1000]
+                session.commit()
+        except Exception:
+            pass
+        return {"success": False, "error": str(exc)}
 
     finally:
         session.close()
