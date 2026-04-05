@@ -34,7 +34,9 @@ REPO_ROOT = Path(_os.environ["TANTRA_ROOT"]).resolve() if _os.environ.get("TANTR
 REGISTRY_PATH = REPO_ROOT / "config" / "tantra_models.yaml"
 TEMPLATE_PATH = REPO_ROOT / "config" / "litellm_config.template.yaml"
 OUTPUT_PATH = REPO_ROOT / "config" / "litellm_config.yaml"
-OLLAMA_API = "http://localhost:11434"
+# Inside Docker containers Ollama is reachable at ollama:11434 (Docker network name).
+# On the host it's localhost:11434. Respect OLLAMA_BASE_URL if set.
+OLLAMA_API = _os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
 
 
 # ---------------------------------------------------------------------------
