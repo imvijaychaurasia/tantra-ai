@@ -167,6 +167,8 @@ def _restart_litellm() -> bool:
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    global OLLAMA_API  # must be declared before any use of OLLAMA_API in this scope
+
     parser = argparse.ArgumentParser(
         description="Generate litellm_config.yaml from tantra_models.yaml"
     )
@@ -187,8 +189,6 @@ def main() -> None:
         help=f"Ollama API base URL (default: {OLLAMA_API})"
     )
     args = parser.parse_args()
-
-    global OLLAMA_API
     OLLAMA_API = args.ollama_url
 
     # ── Load registry ────────────────────────────────────────────────────────
