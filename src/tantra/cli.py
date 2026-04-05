@@ -1989,12 +1989,18 @@ config_app = typer.Typer(
 app.add_typer(config_app, name="config")
 
 def _find_project_root() -> Path:
-    """Walk up from __file__ until we find pyproject.toml (= repo root).
+    """Locate the writable project root regardless of where the package is installed.
 
-    Falls back to TANTRA_ROOT env-var, then CWD.  This makes the config
-    commands work correctly on the host machine regardless of where the
-    package was installed from (e.g. editable install under /app inside
-    a Docker container vs the actual checkout in ~/tantra-ai on the host).
+    Priority:
+      1. $TANTRA_ROOT env var (explicit override)
+      2. Walk UP from cwd  — works when user is inside the git checkout
+      3. Walk UP from __file__ — works for standard (non-editable) installs
+      4. cwd fallback
+
+    The cwd walk comes first because on this stack the package is installed
+    editable from /app (read-only Docker bind-mount), so __file__ resolves
+    to /app/... which has a pyproject.toml but is not writable.  cwd is
+    the actual writable checkout the user has cd'd into.
     """
     import os
 
@@ -2002,11 +2008,25 @@ def _find_project_root() -> Path:
     if env_root:
         return Path(env_root).resolve()
 
+    # Walk up from cwd first — finds the writable checkout
+    candidate = Path.cwd()
+    for _ in range(10):
+        if (candidate / "pyproject.toml").exists():
+            return candidate
+        parent = candidate.parent
+        if parent == candidate:
+            break
+        candidate = parent
+
+    # Walk up from __file__ — fallback for normal installs
     candidate = Path(__file__).resolve().parent
     for _ in range(10):
         if (candidate / "pyproject.toml").exists():
             return candidate
-        candidate = candidate.parent
+        parent = candidate.parent
+        if parent == candidate:
+            break
+        candidate = parent
 
     return Path.cwd()
 
