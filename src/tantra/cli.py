@@ -1988,8 +1988,32 @@ config_app = typer.Typer(
 )
 app.add_typer(config_app, name="config")
 
-_REGISTRY_PATH = Path(__file__).resolve().parents[2] / "config" / "tantra_models.yaml"
-_GENERATOR_PATH = Path(__file__).resolve().parents[2] / "scripts" / "generate_litellm_config.py"
+def _find_project_root() -> Path:
+    """Walk up from __file__ until we find pyproject.toml (= repo root).
+
+    Falls back to TANTRA_ROOT env-var, then CWD.  This makes the config
+    commands work correctly on the host machine regardless of where the
+    package was installed from (e.g. editable install under /app inside
+    a Docker container vs the actual checkout in ~/tantra-ai on the host).
+    """
+    import os
+
+    env_root = os.environ.get("TANTRA_ROOT")
+    if env_root:
+        return Path(env_root).resolve()
+
+    candidate = Path(__file__).resolve().parent
+    for _ in range(10):
+        if (candidate / "pyproject.toml").exists():
+            return candidate
+        candidate = candidate.parent
+
+    return Path.cwd()
+
+
+_PROJECT_ROOT = _find_project_root()
+_REGISTRY_PATH = _PROJECT_ROOT / "config" / "tantra_models.yaml"
+_GENERATOR_PATH = _PROJECT_ROOT / "scripts" / "generate_litellm_config.py"
 
 
 def _load_registry() -> dict:
