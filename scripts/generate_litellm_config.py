@@ -26,8 +26,11 @@ from pathlib import Path
 
 # ---------------------------------------------------------------------------
 # Paths — relative to repo root
+# TANTRA_ROOT env var overrides __file__-based resolution for machines where
+# the script lives in a read-only bind-mount (e.g. Docker /app/scripts).
 # ---------------------------------------------------------------------------
-REPO_ROOT = Path(__file__).parent.parent
+import os as _os
+REPO_ROOT = Path(_os.environ["TANTRA_ROOT"]).resolve() if _os.environ.get("TANTRA_ROOT") else Path(__file__).parent.parent
 REGISTRY_PATH = REPO_ROOT / "config" / "tantra_models.yaml"
 TEMPLATE_PATH = REPO_ROOT / "config" / "litellm_config.template.yaml"
 OUTPUT_PATH = REPO_ROOT / "config" / "litellm_config.yaml"

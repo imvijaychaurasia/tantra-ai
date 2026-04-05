@@ -2056,11 +2056,23 @@ def _save_registry(data: dict) -> None:
 
 
 def _run_generator(*extra_args: str) -> int:
-    """Run generate_litellm_config.py with given args; return exit code."""
-    import subprocess
+    """Run generate_litellm_config.py with the same Python interpreter as the CLI.
 
-    cmd = ["python", str(_GENERATOR_PATH), *extra_args]
-    result = subprocess.run(cmd, capture_output=False)
+    Uses sys.executable so the generator inherits the correct venv (with
+    jinja2 + pyyaml) rather than whatever 'python' resolves to on PATH.
+    Also passes TANTRA_ROOT through the environment so the generator resolves
+    its own paths correctly on this machine.
+    """
+    import os
+    import subprocess
+    import sys
+
+    env = os.environ.copy()
+    # Ensure generator sees the same project root as the CLI
+    env.setdefault("TANTRA_ROOT", str(_PROJECT_ROOT))
+
+    cmd = [sys.executable, str(_GENERATOR_PATH), *extra_args]
+    result = subprocess.run(cmd, capture_output=False, env=env, cwd=str(_PROJECT_ROOT))
     return result.returncode
 
 
