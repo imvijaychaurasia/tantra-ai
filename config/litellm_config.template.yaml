@@ -1,0 +1,156 @@
+# =============================================================================
+# Tantra AI — LiteLLM Proxy Configuration  [AUTO-GENERATED]
+# तंत्र  ·  Universal model gateway
+#
+# !! DO NOT EDIT MANUALLY !!
+# This file is generated from:  config/tantra_models.yaml
+# Regenerate with:             tantra config sync-models --apply
+#                          or: make sync-models
+#
+# Generated: {{ generated_at }}
+# Registry:  config/tantra_models.yaml
+# =============================================================================
+# Active tier → model mapping:
+{% for tier_name, tier in tiers.items() %}#   {{ "%-10s"|format(tier_name) }}→  {{ tier.primary }}{% if tier.get('cloud') %}  |  cloud: {{ tier.cloud }}{% endif %}
+
+{% endfor %}
+# =============================================================================
+
+general_settings:
+  master_key: "os.environ/LITELLM_MASTER_KEY"
+  # database_url intentionally omitted — pure model proxy, no Prisma dependency.
+  disable_spend_logs: true
+  disable_master_key_return: true
+
+litellm_settings:
+  set_verbose: false
+  json_logs: true
+  request_timeout: 600
+  num_retries: 2
+  fallbacks:
+    - frontier: ["director", "manager"]
+    - director: ["manager", "fast"]
+    - manager:  ["worker", "fast"]
+  drop_params: true
+
+router_settings:
+  routing_strategy: "least-busy"
+  model_group_alias:
+    gpt4: "frontier"
+    claude: "frontier"
+    llama70b: "director"
+    qwen30b: "director"
+    qwen72b: "manager"
+    qwen14b: "worker"
+    phi4: "worker"
+    qwen4b: "fast"
+    mistral: "fast"
+
+model_list:
+{% for tier_name, tier in tiers.items() %}
+  # ---------------------------------------------------------------------------
+  # {{ tier_name | upper }} — {{ tier.description }}
+  # ---------------------------------------------------------------------------
+{% if tier_name == 'frontier' %}
+{% if tier.get('cloud') %}
+  - model_name: {{ tier_name }}
+    litellm_params:
+      model: {{ tier.cloud }}
+      api_key: "os.environ/ANTHROPIC_API_KEY"
+      max_tokens: {{ tier.max_tokens }}
+      temperature: {{ tier.temperature }}
+    model_info:
+      description: "{{ tier_name }} cloud primary — {{ tier.cloud }}"
+
+{% endif %}
+{% if tier.get('cloud_fallback') %}
+  - model_name: {{ tier_name }}
+    litellm_params:
+      model: {{ tier.cloud_fallback }}
+      api_key: "os.environ/OPENAI_API_KEY"
+      max_tokens: {{ tier.max_tokens }}
+      temperature: {{ tier.temperature }}
+    model_info:
+      description: "{{ tier_name }} cloud fallback — {{ tier.cloud_fallback }}"
+
+{% endif %}
+  - model_name: {{ tier_name }}
+    litellm_params:
+      model: ollama/{{ tier.primary }}
+      api_base: "http://ollama:11434"
+      stream: true
+      max_tokens: {{ tier.max_tokens }}
+      temperature: {{ tier.temperature }}
+    model_info:
+      description: "{{ tier_name }} local fallback — {{ tier.primary }}"
+
+{% elif tier_name == 'embedder' %}
+  - model_name: {{ tier_name }}
+    litellm_params:
+      model: ollama/{{ tier.primary }}
+      api_base: "http://ollama:11434"
+    model_info:
+      description: "{{ tier_name }} primary — {{ tier.primary }}"
+
+{% if tier.get('fallback') %}
+  - model_name: {{ tier_name }}
+    litellm_params:
+      model: ollama/{{ tier.fallback }}
+      api_base: "http://ollama:11434"
+    model_info:
+      description: "{{ tier_name }} fallback — {{ tier.fallback }}"
+
+{% endif %}
+{% if tier.get('cloud') %}
+  - model_name: {{ tier_name }}
+    litellm_params:
+      model: {{ tier.cloud }}
+      api_key: "os.environ/OPENAI_API_KEY"
+    model_info:
+      description: "{{ tier_name }} cloud fallback — {{ tier.cloud }}"
+
+{% endif %}
+{% else %}
+{% if tier.get('cloud') %}
+  - model_name: {{ tier_name }}
+    litellm_params:
+      model: {{ tier.cloud }}
+{% if 'groq' in tier.cloud %}
+      api_key: "os.environ/GROQ_API_KEY"
+{% elif 'anthropic' in tier.cloud %}
+      api_key: "os.environ/ANTHROPIC_API_KEY"
+{% elif 'openai' in tier.cloud %}
+      api_key: "os.environ/OPENAI_API_KEY"
+{% else %}
+      api_key: "os.environ/LITELLM_MASTER_KEY"
+{% endif %}
+      max_tokens: {{ tier.max_tokens }}
+      temperature: {{ tier.temperature }}
+    model_info:
+      description: "{{ tier_name }} cloud — {{ tier.cloud }}"
+
+{% endif %}
+  - model_name: {{ tier_name }}
+    litellm_params:
+      model: ollama/{{ tier.primary }}
+      api_base: "http://ollama:11434"
+      stream: true
+      max_tokens: {{ tier.max_tokens }}
+      temperature: {{ tier.temperature }}
+    model_info:
+      description: "{{ tier_name }} primary — {{ tier.primary }}"
+
+{% if tier.get('fallback') %}
+  - model_name: {{ tier_name }}
+    litellm_params:
+      model: ollama/{{ tier.fallback }}
+      api_base: "http://ollama:11434"
+      stream: true
+      max_tokens: {{ tier.max_tokens }}
+      temperature: {{ tier.temperature }}
+    model_info:
+      description: "{{ tier_name }} fallback — {{ tier.fallback }}"
+
+{% endif %}
+{% endif %}
+{% endfor %}

@@ -1,0 +1,88 @@
+# =============================================================================
+# Tantra AI — Model Registry
+# तंत्र  ·  Single source of truth for all model tier mappings
+# =============================================================================
+#
+# This file drives litellm_config.yaml via:
+#   tantra config model <tier> <ollama-tag>   — update a tier + regenerate config
+#   tantra config list-models                 — show current tier → model mapping
+#   tantra config sync-models                 — check registry vs Ollama pulled models
+#   make sync-models                          — same as above (alias)
+#
+# Rules:
+#   - `primary` must be an Ollama model tag that is actually pulled locally.
+#   - `fallback` is optional secondary Ollama model (used if primary OOM/fails).
+#   - `cloud` is optional provider/model string (used when API key is set).
+#   - `cloud_fallback` is a second cloud option tried after `cloud`.
+#   - Models under `heavy` are large (>20GB) — only added to config when listed here.
+#   - To add a new cloud model: set `cloud: groq/llama-3.3-70b-versatile`
+#   - To upgrade a tier: run `tantra config model manager gemma4:27b`
+#
+# Last updated: 2026-04-05  (auto-updated by `tantra config model`)
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# Tiers
+# ---------------------------------------------------------------------------
+
+tiers:
+
+  frontier:
+    description: "Strategic decisions, C-suite agents, final reviews"
+    primary: qwen3:30b                             # local fallback when cloud unavailable
+    cloud: anthropic/claude-3-5-sonnet-20241022    # preferred cloud
+    cloud_fallback: openai/gpt-4o                  # second cloud option
+    max_tokens: 8192
+    temperature: 0.7
+
+  director:
+    description: "Department heads, weekly planning, subordinate coordination"
+    primary: qwen3:30b                             # Qwen3-30B MoE — 8GB VRAM, 128K ctx
+    cloud: groq/llama-3.3-70b-versatile            # Groq fast inference (when GROQ_API_KEY set)
+    max_tokens: 8192
+    temperature: 0.6
+
+  manager:
+    description: "Mid-level agents, multi-step execution, sub-task management"
+    primary: qwen3:14b                             # 10GB VRAM, 128K ctx
+    max_tokens: 8192
+    temperature: 0.5
+
+  worker:
+    description: "Focused single-task execution — post writers, analysers"
+    primary: qwen3:14b                             # 128K ctx
+    max_tokens: 4096
+    temperature: 0.4
+
+  coder:
+    description: "Code generation, debugging, infra scripting"
+    primary: qwen3:30b                             # best available (deepseek-coder-v2 pending pull)
+    fallback: qwen3:14b
+    max_tokens: 4096
+    temperature: 0.2
+
+  fast:
+    description: "Ultra-low latency — agentic loops, routing, classification"
+    primary: qwen3:4b                              # 3GB VRAM, 128K ctx
+    cloud: groq/mixtral-8x7b-32768                 # Groq fast cloud fallback
+    max_tokens: 2048
+    temperature: 0.3
+
+  embedder:
+    description: "Text embeddings for semantic memory and RAG"
+    primary: bge-m3                                # dense+sparse+ColBERT, 100 langs, 8192 ctx
+    fallback: nomic-embed-text                     # 768-dim fallback
+    cloud: openai/text-embedding-3-small           # cloud fallback
+    max_tokens: null
+    temperature: null
+
+# ---------------------------------------------------------------------------
+# Pending pulls — add primary/fallback above once pulled
+# ---------------------------------------------------------------------------
+# pending_pulls:
+#   - deepseek-coder-v2:16b   # coder primary once pulled (16GB VRAM)
+#   - phi4:14b                # worker fallback (16K ctx, proven quality)
+#   - mistral-nemo:12b        # fast fallback (12B, already removed from config)
+#   - qwen2.5:72b             # manager heavy (~40GB, high VRAM budget only)
+#   - llama3.3:70b            # director/frontier heavy (27.6GB VRAM)
+#   - gemma3:27b              # candidate — evaluate vs qwen3:30b for director

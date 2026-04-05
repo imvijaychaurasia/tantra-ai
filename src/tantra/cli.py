@@ -1975,5 +1975,145 @@ def monitor(
             pass
 
 
+# ---------------------------------------------------------------------------
+# `tantra config` sub-commands  (Option B — Model Registry)
+# ---------------------------------------------------------------------------
+
+config_app = typer.Typer(
+    name="config",
+    help="Manage Tantra AI model registry and LiteLLM configuration",
+    add_completion=False,
+    rich_markup_mode="rich",
+)
+app.add_typer(config_app, name="config")
+
+_REGISTRY_PATH = Path(__file__).resolve().parents[2] / "config" / "tantra_models.yaml"
+_GENERATOR_PATH = Path(__file__).resolve().parents[2] / "scripts" / "generate_litellm_config.py"
+
+
+def _load_registry() -> dict:
+    """Load tantra_models.yaml; raise if missing."""
+    import yaml  # type: ignore
+
+    if not _REGISTRY_PATH.exists():
+        console.print(f"[red]Registry not found:[/red] {_REGISTRY_PATH}")
+        raise typer.Exit(1)
+    with open(_REGISTRY_PATH) as f:
+        return yaml.safe_load(f)
+
+
+def _save_registry(data: dict) -> None:
+    """Write registry back to tantra_models.yaml preserving structure."""
+    import yaml  # type: ignore
+
+    with open(_REGISTRY_PATH, "w") as f:
+        yaml.dump(data, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+
+
+def _run_generator(*extra_args: str) -> int:
+    """Run generate_litellm_config.py with given args; return exit code."""
+    import subprocess
+
+    cmd = ["python", str(_GENERATOR_PATH), *extra_args]
+    result = subprocess.run(cmd, capture_output=False)
+    return result.returncode
+
+
+@config_app.command("model")
+def config_model(
+    tier: str = typer.Argument(..., help="Tier name (e.g. director, manager, worker, coder, fast)"),
+    tag: str = typer.Argument(..., help="Ollama model tag (e.g. qwen3:30b) or cloud ID"),
+    no_restart: bool = typer.Option(False, "--no-restart", help="Skip restarting LiteLLM after update"),
+) -> None:
+    """Set the PRIMARY model for a tier in the registry, then regenerate + restart LiteLLM."""
+    data = _load_registry()
+    tiers = data.get("tiers", {})
+
+    if tier not in tiers:
+        available = ", ".join(tiers.keys())
+        console.print(f"[red]Unknown tier:[/red] '{tier}'. Available: {available}")
+        raise typer.Exit(1)
+
+    old_primary = tiers[tier].get("primary", "<none>")
+    tiers[tier]["primary"] = tag
+    data["tiers"] = tiers
+    _save_registry(data)
+
+    console.print(f"[green]✓[/green] Updated [bold]{tier}[/bold]: {old_primary} → [bold]{tag}[/bold]")
+
+    gen_args = ["--apply"]
+    if not no_restart:
+        gen_args.append("--restart-litellm")
+
+    console.print("[dim]Regenerating litellm_config.yaml …[/dim]")
+    rc = _run_generator(*gen_args)
+    if rc != 0:
+        console.print(f"[red]Generator failed (exit {rc}). Check output above.[/red]")
+        raise typer.Exit(rc)
+
+    console.print("[green]✓[/green] litellm_config.yaml updated" + (" and LiteLLM restarted." if not no_restart else "."))
+
+
+@config_app.command("list-models")
+def config_list_models() -> None:
+    """Display the current model registry in a Rich table."""
+    from rich.table import Table
+
+    data = _load_registry()
+    tiers = data.get("tiers", {})
+
+    table = Table(title="Tantra Model Registry", show_lines=True)
+    table.add_column("Tier", style="bold cyan", no_wrap=True)
+    table.add_column("Primary (local)", style="green")
+    table.add_column("Fallback (local)", style="yellow")
+    table.add_column("Cloud", style="magenta")
+    table.add_column("Cloud Fallback", style="dim magenta")
+    table.add_column("Max Tokens", justify="right")
+    table.add_column("Temp", justify="right")
+
+    for tier_name, cfg in tiers.items():
+        table.add_row(
+            tier_name,
+            cfg.get("primary", "—"),
+            cfg.get("fallback", "—"),
+            cfg.get("cloud", "—"),
+            cfg.get("cloud_fallback", "—"),
+            str(cfg.get("max_tokens", "—")),
+            str(cfg.get("temperature", "—")),
+        )
+
+    console.print(table)
+
+    pending = data.get("pending_pulls", [])
+    if pending:
+        console.print(f"\n[dim]Pending pulls ({len(pending)}):[/dim] {', '.join(pending)}")
+
+
+@config_app.command("sync-models")
+def config_sync_models(
+    apply: bool = typer.Option(False, "--apply", help="Write regenerated config to disk"),
+    restart: bool = typer.Option(False, "--restart", help="Also restart LiteLLM (implies --apply)"),
+) -> None:
+    """Check registry vs Ollama models; optionally regenerate + restart LiteLLM."""
+    console.print("[dim]Checking registry against Ollama …[/dim]")
+    _run_generator("--check-ollama")
+
+    if restart:
+        apply = True
+
+    if apply:
+        gen_args = ["--apply"]
+        if restart:
+            gen_args.append("--restart-litellm")
+        console.print("[dim]Regenerating litellm_config.yaml …[/dim]")
+        rc = _run_generator(*gen_args)
+        if rc != 0:
+            console.print(f"[red]Generator failed (exit {rc}).[/red]")
+            raise typer.Exit(rc)
+        console.print("[green]✓[/green] litellm_config.yaml updated" + (" and LiteLLM restarted." if restart else "."))
+    else:
+        console.print("[dim]Dry-run complete. Use --apply to write changes.[/dim]")
+
+
 if __name__ == "__main__":
     app()
