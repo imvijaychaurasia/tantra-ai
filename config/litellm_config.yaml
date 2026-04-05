@@ -2,31 +2,24 @@
 # Tantra AI — LiteLLM Proxy Configuration
 # तंत्र  ·  Universal model gateway
 # =============================================================================
-# Model tier aliases:
-#   frontier  →  Best available (cloud preferred, Llama 3.3 70B local fallback)
-#   director  →  Senior reasoning  — Qwen3-30B-A3B MoE (8GB VRAM, 128K ctx)
-#   manager   →  Mid-tier planning — Qwen3-14B (10GB VRAM, 128K ctx)
-#   worker    →  Efficient executor — Qwen3-14B (10GB VRAM, 128K ctx)
-#   coder     →  Code specialist   — DeepSeek Coder V2 16B local
-#   fast      →  Ultra-fast loops  — Qwen3-4B (3GB VRAM, 128K ctx)
-#   embedder  →  Embeddings        — BGE-M3 (dense+sparse+ColBERT, 100 langs)
+# Model tier aliases (all local models available in Ollama):
+#   frontier  →  Cloud preferred (Claude/GPT-4o), qwen3:30b local fallback
+#   director  →  Senior reasoning    — Qwen3-30B MoE  (8GB VRAM, 128K ctx)
+#   manager   →  Mid-tier planning   — Qwen3-14B      (10GB VRAM, 128K ctx)
+#   worker    →  Focused execution   — Qwen3-14B      (10GB VRAM, 128K ctx)
+#   coder     →  Code specialist     — Qwen3-30B      (best coder available)
+#   fast      →  Ultra-fast loops    — Qwen3-4B       (3GB VRAM, 128K ctx)
+#   embedder  →  Embeddings          — BGE-M3 + nomic-embed-text
 #
-# Last model upgrade: 2026-04-03
-#   director : phi4:14b + llama3.3:70b  →  qwen3:30b (MoE, 8GB, 128K ctx)
-#   worker   : phi4:14b                 →  qwen3:14b (128K ctx vs 16K)
-#   fast     : mistral-nemo:12b         →  qwen3:4b  (128K ctx, 3GB VRAM)
-#   manager  : phi4:14b primary         →  qwen3:14b primary
-#   embedder : nomic-embed-text         →  bge-m3    (best open RAG embedder)
+# Pending pulls (will add back when VRAM budget allows):
+#   deepseek-coder-v2:16b, phi4:14b, mistral-nemo:12b, qwen2.5:72b, llama3.3:70b
 #
-# Future (last-stage): tantra config model <tier> <ollama-tag>
-#   Will hot-update this config + restart litellm without editing YAML manually.
+# Last config update: 2026-04-05 — stripped unpulled models to fix routing errors
 # =============================================================================
 
 general_settings:
   master_key: "os.environ/LITELLM_MASTER_KEY"
-  # database_url intentionally omitted — we use LiteLLM as a pure model proxy.
-  # No analytics, no DB-stored model configs, no Prisma dependency.
-  # All model configs are defined statically in this YAML file.
+  # database_url intentionally omitted — pure model proxy, no Prisma dependency.
   disable_spend_logs: true
   disable_master_key_return: true
 
@@ -38,13 +31,12 @@ litellm_settings:
   fallbacks:
     - frontier: ["director", "manager"]   # If cloud fails → local fallback
     - director: ["manager", "fast"]       # If qwen3:30b OOM → qwen3:14b → qwen3:4b
-    - manager:  ["worker", "fast"]        # If 72B OOM → qwen3:14b → qwen3:4b
+    - manager:  ["worker", "fast"]        # If 14B busy → worker → fast
   drop_params: true                       # Ignore unsupported params silently
 
 router_settings:
-  routing_strategy: "latency-based-routing"
+  routing_strategy: "least-busy"          # Changed from latency-based to avoid probing unpulled models
   model_group_alias:
-    # Short aliases that agents use in code
     gpt4: "frontier"
     claude: "frontier"
     llama70b: "director"
@@ -59,8 +51,7 @@ model_list:
 
   # ---------------------------------------------------------------------------
   # FRONTIER — Strategic reasoning, final decisions, complex planning
-  # Preferred: Claude 3.5 Sonnet (Anthropic) or GPT-4o (OpenAI)
-  # Fallback:  Llama 3.3 70B (local) when no API key
+  # Cloud: Claude 3.5 Sonnet or GPT-4o  |  Local fallback: qwen3:30b
   # ---------------------------------------------------------------------------
   - model_name: frontier
     litellm_params:
@@ -80,24 +71,20 @@ model_list:
     model_info:
       description: "Frontier fallback via OpenAI"
 
-  # Local frontier fallback — Llama 3.3 70B (Linux/NVIDIA with RTX 5070 Ti)
   - model_name: frontier
     litellm_params:
-      model: ollama/llama3.3:70b
+      model: ollama/qwen3:30b
       api_base: "http://ollama:11434"
       stream: true
+      max_tokens: 8192
+      temperature: 0.7
     model_info:
-      description: "Local frontier fallback — Llama 3.3 70B (Linux/NVIDIA mode)"
+      description: "Local frontier fallback — Qwen3-30B MoE (8GB VRAM)"
 
   # ---------------------------------------------------------------------------
   # DIRECTOR — Department heads, weekly planning, subordinate coordination
-  # Primary: Qwen3-30B-A3B MoE — 30B quality at 3B active params, 128K ctx,
-  #          only ~8GB VRAM. Massive upgrade over phi4:14b at the same VRAM.
-  # Cloud:   Groq llama3.3:70b — if GROQ_API_KEY is set (low latency cloud)
-  # Heavy:   Llama 3.3 70B local — when VRAM budget allows (27.6 GiB)
+  # Cloud: Groq llama3.3:70b  |  Local: qwen3:30b MoE
   # ---------------------------------------------------------------------------
-
-  # Director cloud — Groq llama3.3:70b (if GROQ_API_KEY set, very fast)
   - model_name: director
     litellm_params:
       model: groq/llama-3.3-70b-versatile
@@ -107,7 +94,6 @@ model_list:
     model_info:
       description: "Director cloud — llama3.3:70b via Groq (fast, low latency)"
 
-  # Director primary local — Qwen3-30B-A3B MoE (8GB VRAM, 128K ctx)
   - model_name: director
     litellm_params:
       model: ollama/qwen3:30b
@@ -116,26 +102,12 @@ model_list:
       max_tokens: 8192
       temperature: 0.6
     model_info:
-      description: "Director primary — Qwen3-30B MoE (8GB VRAM, 128K ctx, 30B quality)"
-
-  # Director heavy local — Llama 3.3 70B (needs 27.6 GiB, use when VRAM free)
-  - model_name: director
-    litellm_params:
-      model: ollama/llama3.3:70b
-      api_base: "http://ollama:11434"
-      stream: true
-      max_tokens: 8192
-      temperature: 0.6
-    model_info:
-      description: "Director heavy — Llama 3.3 70B (27.6GB VRAM, use when free)"
+      description: "Director local — Qwen3-30B MoE (8GB VRAM, 128K ctx)"
 
   # ---------------------------------------------------------------------------
   # MANAGER — Mid-level agents, multi-step execution, sub-task management
-  # Primary: Qwen3-14B — 128K ctx, strong tool use, 10GB VRAM
-  # Heavy:   Qwen 2.5 72B — when VRAM budget allows (~40 GiB)
+  # Primary: Qwen3-14B (10GB VRAM, 128K ctx)
   # ---------------------------------------------------------------------------
-
-  # Manager primary local — Qwen3-14B (10GB VRAM, 128K ctx)
   - model_name: manager
     litellm_params:
       model: ollama/qwen3:14b
@@ -144,23 +116,11 @@ model_list:
       max_tokens: 8192
       temperature: 0.5
     model_info:
-      description: "Manager primary — Qwen3-14B (10GB VRAM, 128K ctx)"
-
-  # Manager heavy local — Qwen 2.5 72B (needs ~40 GiB, use when VRAM free)
-  - model_name: manager
-    litellm_params:
-      model: ollama/qwen2.5:72b
-      api_base: "http://ollama:11434"
-      stream: true
-      max_tokens: 8192
-      temperature: 0.5
-    model_info:
-      description: "Manager heavy — Qwen 2.5 72B (40GB VRAM, use when free)"
+      description: "Manager — Qwen3-14B (10GB VRAM, 128K ctx)"
 
   # ---------------------------------------------------------------------------
   # WORKER — Focused single-task execution
-  # Primary: Qwen3-14B — beats phi4:14b on context (128K vs 16K), same VRAM
-  # Fallback: Phi-4 14B — proven baseline, still excellent quality
+  # Primary: Qwen3-14B (128K ctx)
   # ---------------------------------------------------------------------------
   - model_name: worker
     litellm_params:
@@ -170,48 +130,38 @@ model_list:
       max_tokens: 4096
       temperature: 0.4
     model_info:
-      description: "Worker primary — Qwen3-14B (128K ctx, post writers, analyzers)"
-
-  # Worker fallback — Phi-4 14B (proven, 16K ctx)
-  - model_name: worker
-    litellm_params:
-      model: ollama/phi4:14b
-      api_base: "http://ollama:11434"
-      stream: true
-      max_tokens: 4096
-      temperature: 0.4
-    model_info:
-      description: "Worker fallback — Phi-4 14B (16K ctx)"
+      description: "Worker — Qwen3-14B (128K ctx, post writers, analyzers)"
 
   # ---------------------------------------------------------------------------
   # CODER — Code generation, debugging, infra scripting
-  # Linux/NVIDIA: deepseek-coder-v2:16b primary  |  phi4 fallback
+  # Best available: qwen3:30b (MoE, excellent reasoning)
+  # Fallback: qwen3:14b
+  # (deepseek-coder-v2:16b pending pull)
   # ---------------------------------------------------------------------------
   - model_name: coder
     litellm_params:
-      model: ollama/deepseek-coder-v2:16b
+      model: ollama/qwen3:30b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 4096
       temperature: 0.2
     model_info:
-      description: "Code agents — DeepSeek Coder V2 16B (Linux/NVIDIA mode)"
+      description: "Coder primary — Qwen3-30B (best available, pending deepseek pull)"
 
-  # Coder fallback
   - model_name: coder
     litellm_params:
-      model: ollama/phi4:14b
+      model: ollama/qwen3:14b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 4096
       temperature: 0.2
     model_info:
-      description: "Coder fallback — Phi-4 14B"
+      description: "Coder fallback — Qwen3-14B"
 
   # ---------------------------------------------------------------------------
   # FAST — Ultra-low latency for reactive/classification/agentic loop tasks
-  # Primary: Qwen3-4B — 128K ctx, only 3GB VRAM, excellent for rapid loops
-  # Fallback: Groq cloud mixtral → Mistral Nemo local
+  # Primary: Qwen3-4B (128K ctx, 3GB VRAM)
+  # Cloud fallback: Groq Mixtral
   # ---------------------------------------------------------------------------
   - model_name: fast
     litellm_params:
@@ -223,7 +173,6 @@ model_list:
     model_info:
       description: "Fast primary — Qwen3-4B (128K ctx, 3GB VRAM, agentic loops)"
 
-  # Fast cloud fallback via Groq (very low latency)
   - model_name: fast
     litellm_params:
       model: groq/mixtral-8x7b-32768
@@ -233,21 +182,10 @@ model_list:
     model_info:
       description: "Fast cloud fallback — Mixtral 8x7B via Groq"
 
-  # Fast local fallback — Mistral Nemo 12B (already pulled)
-  - model_name: fast
-    litellm_params:
-      model: ollama/mistral-nemo:12b
-      api_base: "http://ollama:11434"
-      stream: true
-      max_tokens: 2048
-      temperature: 0.3
-    model_info:
-      description: "Fast local fallback — Mistral Nemo 12B"
-
   # ---------------------------------------------------------------------------
   # EMBEDDER — Text embeddings for semantic memory and RAG
-  # Primary: BGE-M3 — dense+sparse+ColBERT in one model, 100 langs, 8192 ctx
-  # Fallback: nomic-embed-text (still pulled, use if bge-m3 unavailable)
+  # Primary: BGE-M3 (dense+sparse+ColBERT, 100 langs, 8192 ctx)
+  # Fallback: nomic-embed-text + OpenAI cloud
   # ---------------------------------------------------------------------------
   - model_name: embedder
     litellm_params:
@@ -256,7 +194,6 @@ model_list:
     model_info:
       description: "Embedder primary — BGE-M3 (dense+sparse+ColBERT, 100 langs)"
 
-  # Embedder fallback — nomic-embed-text (already pulled, 768-dim)
   - model_name: embedder
     litellm_params:
       model: ollama/nomic-embed-text
@@ -264,10 +201,9 @@ model_list:
     model_info:
       description: "Embedder fallback — nomic-embed-text (768-dim)"
 
-  # OpenAI embeddings as cloud fallback
   - model_name: embedder
     litellm_params:
       model: openai/text-embedding-3-small
       api_key: "os.environ/OPENAI_API_KEY"
     model_info:
-      description: "Embedder cloud fallback — OpenAI text-embedding-3-small (1536-dim)"
+      description: "Embedder cloud fallback — OpenAI text-embedding-3-small"
