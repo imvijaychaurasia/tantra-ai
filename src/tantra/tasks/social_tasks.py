@@ -1129,6 +1129,20 @@ def post_tantra_progress(self, director_instructions: str = "") -> dict:
         )
         post_text = _clean_llm_output(post_text)
         logger.info("Generated progress post (%d chars): %s...", len(post_text), post_text[:100])
+        # Guard: never publish empty or near-empty content — causes [400] from Zernio/LinkedIn
+        if len(post_text.strip()) < 30:
+            logger.error(
+                "LLM returned empty or too-short post text (%d chars) — aborting to avoid "
+                "[400] Content is required. Angle=%d, raw_len=%d",
+                len(post_text.strip()), next_angle, len(post_text),
+            )
+            return {
+                "success": False,
+                "error": (
+                    f"LLM generated empty content ({len(post_text.strip())} chars) — "
+                    "retry will attempt fresh generation"
+                ),
+            }
     except Exception as exc:
         logger.error("LLM post generation failed: %s", exc)
         return {"success": False, "error": f"LLM generation failed: {exc}"}
