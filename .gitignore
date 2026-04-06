@@ -10,7 +10,7 @@
 *.pem
 *.p12
 secrets/
-
+.tmp/
 # Python
 __pycache__/
 *.py[cod]
