@@ -1,51 +1,38 @@
 """
 tantra-media — TTS engine
-तंत्र  ·  Text-to-Speech using Microsoft edge-tts
+तंत्र  ·  Text-to-Speech using OpenAI TTS API
 
 Generates narration MP3 files for each scene from the script's narration field.
-edge-tts uses Microsoft Azure Neural TTS (free, no API key, no model download).
+OpenAI TTS produces high-quality neural voices and works from any server IP
+(unlike edge-tts which is blocked by Microsoft from datacenter/VPS IPs).
 
 Voice selection:
-  TANTRA_MEDIA_VOICE env var — any edge-tts voice name
-  Default: en-US-GuyNeural (male, natural, good for tech content)
+  TANTRA_MEDIA_VOICE env var — any OpenAI TTS voice name
+  Default: onyx (male, deep, authoritative — ideal for tech content)
 
-Quality voices for tech YouTube:
-  en-US-GuyNeural       — Male, clear, natural (default)
-  en-US-JennyNeural     — Female, warm, professional
-  en-US-DavisNeural     — Male, deep, authoritative
-  en-US-TonyNeural      — Male, energetic, enthusiastic
+Available OpenAI TTS voices:
+  alloy    — Neutral, versatile
+  echo     — Male, engaging
+  fable    — Expressive, warm
+  onyx     — Male, deep, authoritative (default)
+  nova     — Female, warm, professional
+  shimmer  — Female, clear, bright
+
+Model:
+  TANTRA_MEDIA_TTS_MODEL env var — tts-1 (fast) or tts-1-hd (higher quality)
+  Default: tts-1
 """
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 from pathlib import Path
 
-import edge_tts
-
 log = logging.getLogger("tantra-media.tts")
 
-# Default voice — can override via env
-DEFAULT_VOICE = os.getenv("TANTRA_MEDIA_VOICE", "en-US-GuyNeural")
-# Speech rate adjustment (e.g. "+10%" for slightly faster delivery)
-SPEECH_RATE = os.getenv("TANTRA_MEDIA_SPEECH_RATE", "+5%")
-
-
-async def _synthesise(text: str, voice: str, output_path: Path) -> float:
-    """
-    Synthesise text to speech and save to output_path (.mp3).
-    Returns audio duration in seconds (estimated from word count).
-    """
-    communicate = edge_tts.Communicate(text, voice, rate=SPEECH_RATE)
-    await communicate.save(str(output_path))
-
-    # Estimate duration: edge-tts doesn't return duration directly.
-    # Average speaking rate ~145 words/min with +5% rate ≈ 152 wpm.
-    words = len(text.split())
-    estimated_duration = max(words / 2.5, 2.0)  # 150 wpm ≈ 2.5 words/sec
-    log.debug("TTS generated %s: %d words → %.1fs", output_path.name, words, estimated_duration)
-    return estimated_duration
+# OpenAI TTS configuration — resolved from env at call time (not module load)
+DEFAULT_VOICE = os.getenv("TANTRA_MEDIA_VOICE", "onyx")
+TTS_MODEL = os.getenv("TANTRA_MEDIA_TTS_MODEL", "tts-1")
 
 
 def generate_scene_audio(
@@ -54,23 +41,48 @@ def generate_scene_audio(
     voice: str | None = None,
 ) -> float:
     """
-    Synchronous wrapper: generate TTS audio for a scene narration.
+    Synchronous: generate TTS audio for a scene narration using OpenAI TTS.
+
+    Fully synchronous — no asyncio involved, safe to call from any context
+    including FastAPI async handlers via run_in_executor().
 
     Args:
         narration:   Scene narration text from the script JSON.
         output_path: Where to write the .mp3 file.
-        voice:       edge-tts voice name (default from env).
+        voice:       OpenAI TTS voice name (default: onyx).
 
     Returns:
         Estimated audio duration in seconds.
     """
+    from openai import OpenAI
+
     voice = voice or DEFAULT_VOICE
+    model = TTS_MODEL
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
+    api_key = os.getenv("OPENAI_API_KEY", "")
+    if not api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set — cannot generate TTS audio. "
+            "Add OPENAI_API_KEY to your .env file."
+        )
+
     try:
-        duration = asyncio.run(_synthesise(narration, voice, output_path))
-        log.info("TTS ✓ %s (%.1fs)", output_path.name, duration)
-        return duration
+        client = OpenAI(api_key=api_key)
+        with client.audio.speech.with_streaming_response.create(
+            model=model,
+            voice=voice,          # type: ignore[arg-type]
+            input=narration,
+            response_format="mp3",
+        ) as response:
+            response.stream_to_file(str(output_path))
+
+        # Estimate duration from word count (~150 wpm ≈ 2.5 words/sec)
+        words = len(narration.split())
+        estimated_duration = max(words / 2.5, 2.0)
+        log.info("TTS ✓ %s via OpenAI/%s (%.1fs estimated)", output_path.name, voice, estimated_duration)
+        return estimated_duration
+
     except Exception as exc:
         log.error("TTS failed for %s: %s", output_path.name, exc)
         raise

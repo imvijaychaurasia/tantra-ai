@@ -453,7 +453,9 @@ services:
       - "${TANTRA_MEDIA_PORT:-8100}:8100"
     environment:
       TANTRA_MEDIA_DIR: /data/media
-      TANTRA_MEDIA_VOICE: ${TANTRA_MEDIA_VOICE:-en-US-GuyNeural}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      TANTRA_MEDIA_VOICE: ${TANTRA_MEDIA_VOICE:-onyx}
+      TANTRA_MEDIA_TTS_MODEL: ${TANTRA_MEDIA_TTS_MODEL:-tts-1}
       TANTRA_MEDIA_SPEECH_RATE: ${TANTRA_MEDIA_SPEECH_RATE:-+5%}
     networks:
       tantra-net:

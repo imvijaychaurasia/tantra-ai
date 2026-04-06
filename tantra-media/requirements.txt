@@ -5,8 +5,8 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 pydantic==2.9.2
 
-# TTS — Microsoft edge-tts (zero model download, neural quality)
-edge-tts==6.1.12
+# TTS — OpenAI TTS API (neural quality, works from any server IP)
+openai>=1.35.0
 
 # Image generation — Pillow for styled slide images
 Pillow==10.4.0
