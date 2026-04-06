@@ -11,7 +11,7 @@ soundfile>=0.12.1
 
 # Image generation — Pillow for styled slide images
 Pillow==10.4.0
-numpy==1.26.4
+numpy>=2.0.2
 
 # HTTP client (for health checks)
 httpx==0.27.2
