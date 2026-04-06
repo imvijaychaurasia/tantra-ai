@@ -142,8 +142,8 @@ def build_youtube_crew(
     recent = recent_video_titles or []
     recent_str = "\n".join(f"  - {t}" for t in recent) if recent else "  (no recent videos yet)"
     channel_ctx = channel_context or (
-        "Building Tantra AI — a fully local autonomous agent stack in Python. "
-        "Audience: engineers, founders, AI practitioners building in public."
+        "Cyber GyanSagar — educational content on technology, science, AI, space, and engineering. "
+        "Audience: curious learners, students, engineers, and tech enthusiasts globally."
     )
 
     # ── Topic Researcher ──────────────────────────────────────────────────────
@@ -215,11 +215,12 @@ def build_youtube_crew(
             "script as a valid JSON object matching the YouTubeScript schema."
         ),
         backstory=(
-            "You are a meticulous quality reviewer who ensures every video represents "
-            "the Tantra AI brand — authentic, technical, building-in-public, zero hype. "
+            "You are a meticulous quality reviewer who ensures every video is high quality — "
+            "authentic, educational, technically accurate, and zero hype. "
             "You check that the hook grabs in the first 5 seconds, that each scene has "
             "a clear narration and visual prompt, that the CTA is specific and genuine, "
             "and that the thumbnail prompt will produce a compelling image. "
+            "You NEVER change the video topic — the topic is fixed by the Director. "
             "Your final output is ALWAYS a valid JSON object — no markdown, no preamble. "
             "You MUST include ALL fields: title, duration_target_seconds, hook, scenes, "
             "call_to_action, thumbnail_concept, thumbnail_prompt, description, and tags. "

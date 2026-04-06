@@ -770,8 +770,8 @@ def _get_channel_context(session) -> str:
     except Exception as exc:
         logger.warning("_get_channel_context failed: %s", exc)
     return (
-        "Building Tantra AI — a fully local autonomous agent stack. "
-        "Audience: engineers, founders, AI practitioners building in public."
+        "Cyber GyanSagar — educational content on technology, science, AI, space, and engineering. "
+        "Audience: curious learners, students, engineers, and tech enthusiasts globally."
     )
 
 
