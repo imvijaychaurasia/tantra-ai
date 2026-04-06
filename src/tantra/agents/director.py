@@ -211,9 +211,9 @@ Be concise — no bullet-point dumps unless genuinely warranted.
 - Stack: Python + CrewAI + Ollama (local GPU) + FastAPI + Celery + Redis + Postgres + Qdrant + n8n
 - Phase 1 ✅: LinkedIn content pipeline (research → draft → approve → publish) — LIVE
 - Phase 2 ✅: Director planning engine (weekly plans, AgentTask dispatch) — LIVE
-- Phase 3 ✅: YouTube pipeline (youtube_script → tantra-media TTS+video → YouTube upload) — LIVE
-  - Channel: Cyber GyanSagar (UCOWDfNmDDGMUvEIXNJSjHFw) — 3 videos published
-  - First video: https://www.youtube.com/watch?v=mDCg9pTISoI
+- Phase 3 ✅: YouTube pipeline — FULLY AUTONOMOUS (approved → produce → upload → thumbnail, zero manual steps)
+  - Channel: Cyber GyanSagar (UCOWDfNmDDGMUvEIXNJSjHFw) — 5 videos LIVE
+  - Latest: https://www.youtube.com/watch?v=F3-RHXTR1yg
 - Models: qwen3:30b (director), qwen3:14b (manager/worker), qwen3:4b (fast), bge-m3 (embedder)
 - GPU: RTX 5070 Ti 16GB — all inference is local
 - Phase 4 (planned): Instagram + X earning engine (auto + manual modes)

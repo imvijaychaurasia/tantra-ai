@@ -445,6 +445,25 @@ def produce_youtube_video(youtube_video_id: str) -> dict[str, Any]:
             result.get("total_duration", 0),
         )
 
+        # ── Auto-chain: queue upload immediately after production ──────────────
+        try:
+            from tantra.tasks.celery_app import app as _celery_app
+            _upload_task = _celery_app.send_task(
+                "tantra.tasks.youtube.upload_youtube_video",
+                args=[youtube_video_id],
+                queue="default",
+            )
+            logger.info(
+                "produce_youtube_video: auto-queued upload task %s for %s",
+                _upload_task.id, youtube_video_id,
+            )
+        except Exception as _exc:
+            logger.error(
+                "produce_youtube_video: failed to auto-queue upload for %s: %s — "
+                "trigger manually via POST /youtube/%s/upload",
+                youtube_video_id, _exc, youtube_video_id,
+            )
+
         return {
             "success": True,
             "youtube_video_id": youtube_video_id,
@@ -742,6 +761,35 @@ def upload_youtube_video(youtube_video_id: str) -> dict[str, Any]:
             youtube_video_id, yt_url, file_size_mb,
         )
 
+        # ── Auto-upload thumbnail ──────────────────────────────────────────────
+        thumbnail_uploaded = False
+        if yt_video_id and video.thumbnail_path and os.path.exists(video.thumbnail_path):
+            try:
+                thumb_request = youtube.thumbnails().set(
+                    videoId=yt_video_id,
+                    media_body=MediaFileUpload(
+                        video.thumbnail_path,
+                        mimetype="image/png",
+                        resumable=False,
+                    ),
+                )
+                thumb_request.execute()
+                thumbnail_uploaded = True
+                logger.info(
+                    "upload_youtube_video: ✓ thumbnail uploaded for %s", yt_video_id,
+                )
+            except Exception as _thumb_exc:
+                # Thumbnail upload is best-effort — don't fail the whole task
+                logger.warning(
+                    "upload_youtube_video: thumbnail upload failed for %s: %s",
+                    yt_video_id, _thumb_exc,
+                )
+        else:
+            logger.info(
+                "upload_youtube_video: no thumbnail to upload for %s (path=%s)",
+                youtube_video_id, video.thumbnail_path,
+            )
+
         # ── Monitor event ──────────────────────────────────────────────────────
         try:
             from tantra.core.monitor import MonitorEmitter
@@ -760,6 +808,7 @@ def upload_youtube_video(youtube_video_id: str) -> dict[str, Any]:
             "yt_video_id": yt_video_id,
             "youtube_url": yt_url,
             "file_size_mb": round(file_size_mb, 1),
+            "thumbnail_uploaded": thumbnail_uploaded,
         }
 
     except Exception as exc:
