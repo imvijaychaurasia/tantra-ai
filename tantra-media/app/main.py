@@ -84,10 +84,13 @@ async def produce(req: ProduceRequest) -> ProduceResponse:
     """
     Run the full production pipeline for a YouTube video.
 
-    This is a **synchronous** endpoint — it blocks until production completes.
-    Typical duration: 2-8 minutes (depends on number of scenes and TTS speed).
+    Runs the synchronous produce_video() in a thread-pool executor so that
+    the TTS engine (edge-tts) can call asyncio.run() without hitting the
+    "cannot be called from a running event loop" error that occurs when
+    asyncio.run() is invoked directly inside a FastAPI async handler.
 
-    The Celery worker calling this should set a timeout of at least 25 minutes.
+    Typical duration: 2-8 minutes (depends on number of scenes and TTS speed).
+    The Celery worker calling this sets a 30-minute read timeout.
 
     Steps:
       1. TTS narration per scene (edge-tts, ~5s per scene)
@@ -96,17 +99,26 @@ async def produce(req: ProduceRequest) -> ProduceResponse:
       4. Thumbnail generation (Pillow, <1s)
       5. Final video concatenation (ffmpeg stream copy, ~5s)
     """
+    import asyncio as _asyncio
+    from functools import partial as _partial
+
     video_id = req.video_id
     log.info("Produce request: video_id=%s, scenes=%d, force_regen=%s",
              video_id, len(req.script.get("scenes", [])), req.force_regen)
 
     t_start = time.time()
     try:
-        result = produce_video(
-            video_id=video_id,
-            script=req.script,
-            voice=req.voice,
-            force_regen=req.force_regen,
+        # Run in a thread so asyncio.run() inside TTS can create its own event loop.
+        loop = _asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            _partial(
+                produce_video,
+                video_id=video_id,
+                script=req.script,
+                voice=req.voice,
+                force_regen=req.force_regen,
+            ),
         )
     except Exception as exc:
         log.error("Production failed for %s: %s", video_id, exc, exc_info=True)
