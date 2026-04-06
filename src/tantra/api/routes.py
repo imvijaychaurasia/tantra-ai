@@ -982,34 +982,21 @@ async def approve_youtube_script(
     video.approved_at = datetime.utcnow()
     await db.commit()
 
-    # Phase 3b: queue a youtube_produce AgentTask → Celery will call produce_youtube_video
+    # Phase 3b: dispatch produce_youtube_video Celery task directly
     import logging
     _logger = logging.getLogger(__name__)
 
     produce_task_id: str | None = None
     try:
-        from tantra.db.director import AgentTask as _AgentTask
         from tantra.tasks.celery_app import app as celery_app
 
-        # Create AgentTask row to track production
-        produce_task = _AgentTask(
-            task_type="youtube_produce",
-            status="pending",
-            instructions=f"Produce video: {video.title or str(video_id)}",
-            context={"youtube_video_id": str(video_id)},
-            plan_id=video.plan_id,
-        )
-        db.add(produce_task)
-        await db.commit()
-        await db.refresh(produce_task)
-        produce_task_id = str(produce_task.id)
-
-        # Dispatch Celery task
-        celery_app.send_task(
-            "tantra.tasks.director.execute_agent_task",
-            args=[produce_task_id],
+        # Dispatch production task directly (same pattern as /upload endpoint)
+        result = celery_app.send_task(
+            "tantra.tasks.youtube.produce_youtube_video",
+            args=[str(video_id)],
             queue="default",
         )
+        produce_task_id = result.id
         _logger.info(
             "YouTube script approved: video_id=%s title=%r — queued produce task %s",
             str(video_id), video.title, produce_task_id,
@@ -1019,7 +1006,8 @@ async def approve_youtube_script(
             "YouTube approve: failed to queue produce task for video %s: %s",
             str(video_id), exc, exc_info=True,
         )
-        # Don't fail the approval — video is approved, production can be retried manually
+        # Don't fail the approval — video is approved, production can be retried
+        # manually via POST /youtube/{video_id}/produce
 
     return JSONResponse({
         "success": True,
@@ -1028,7 +1016,8 @@ async def approve_youtube_script(
         "produce_task_id": produce_task_id,
         "message": (
             "Script approved. Production queued — tantra-media will generate "
-            "TTS narration, slide images, and the final MP4."
+            "TTS narration, slide images, and the final MP4. "
+            "If produce_task_id is null, retry manually via POST /youtube/{video_id}/produce."
         ),
         "approved_by": body.approved_by,
     })
@@ -1068,6 +1057,76 @@ async def reject_youtube_script(
         "rejection_reason": body.reason,
         "rejected_by": body.rejected_by,
         "message": "Script rejected. Commission a new youtube_script task via Director chat to retry.",
+    })
+
+
+@router.post("/youtube/{video_id}/produce", tags=["youtube"])
+async def trigger_youtube_produce(
+    video_id: uuid.UUID,
+    db: AsyncSession = Depends(get_db_dep),
+) -> JSONResponse:
+    """
+    Manually trigger media production for an approved YouTube script.
+
+    Phase 3b — queues produce_youtube_video Celery task.
+
+    Prerequisites:
+      - Video must be in 'approved' status
+      - tantra-media service must be running
+
+    The task transitions the video: approved → producing → produced
+    Monitor progress via GET /youtube/{video_id} or Flower at :5555.
+    """
+    import logging as _logging
+    from tantra.db.social import YouTubeVideo
+
+    _logger = _logging.getLogger(__name__)
+
+    video = await db.get(YouTubeVideo, video_id)
+    if not video:
+        raise HTTPException(status_code=404, detail=f"YouTubeVideo {video_id} not found")
+
+    if video.status not in ("approved", "failed"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Cannot produce video in status '{video.status}'. "
+                "Expected: approved (or failed for retry). "
+                "Approve the script first via POST /youtube/{video_id}/approve."
+            ),
+        )
+
+    celery_task_id: str | None = None
+    try:
+        from tantra.tasks.celery_app import app as celery_app
+
+        result = celery_app.send_task(
+            "tantra.tasks.youtube.produce_youtube_video",
+            args=[str(video_id)],
+            queue="default",
+        )
+        celery_task_id = result.id
+        _logger.info(
+            "YouTube produce queued: video_id=%s title=%r celery_task=%s",
+            str(video_id), video.title, celery_task_id,
+        )
+    except Exception as exc:
+        _logger.error(
+            "Failed to queue produce task for video %s: %s", str(video_id), exc, exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=f"Failed to queue produce task: {exc}")
+
+    return JSONResponse({
+        "success": True,
+        "video_id": str(video_id),
+        "title": video.title,
+        "status": "producing (queued)",
+        "celery_task_id": celery_task_id,
+        "message": (
+            "Produce task queued. The video will be rendered by tantra-media and "
+            "status will transition to 'produced' on success. "
+            "Monitor at http://localhost:5555 (Flower) or poll GET /youtube/{video_id}."
+        ),
     })
 
 

@@ -607,16 +607,40 @@ def upload_youtube_video(youtube_video_id: str) -> dict[str, Any]:
         youtube = build("youtube", "v3", credentials=creds, cache_discovery=False)
 
         # ── Build video metadata ───────────────────────────────────────────────
-        tags = list(video.tags or [])
+        import re as _re
+        raw_tags = list(video.tags or [])
+
+        def _sanitize_tag(t: str) -> str:
+            """
+            Sanitize a single YouTube tag:
+            - Strip leading/trailing whitespace
+            - Remove characters not allowed by YouTube: < > & ' " and pipe |
+            - Collapse internal whitespace to single spaces
+            - Truncate to 30 characters (YouTube per-tag limit)
+            """
+            t = t.strip()
+            t = _re.sub(r'[<>&\'"|\[\]{}/\\]', '', t)
+            t = _re.sub(r'\s+', ' ', t).strip()
+            return t[:30]
+
+        # Sanitize all tags, drop empties
+        sanitized = [_sanitize_tag(t) for t in raw_tags]
+        sanitized = [t for t in sanitized if t]
+
         # YouTube enforces a 500-character limit on the tags array joined by commas
         tag_budget = 500
         selected_tags: list[str] = []
-        for tag in tags:
+        for tag in sanitized:
             if tag_budget - len(tag) - 1 >= 0:
                 selected_tags.append(tag)
                 tag_budget -= len(tag) + 1
             else:
                 break
+
+        logger.info(
+            "upload_youtube_video: tags sanitized %d → %d (raw=%r)",
+            len(raw_tags), len(selected_tags), raw_tags[:5],
+        )
 
         body = {
             "snippet": {
