@@ -989,7 +989,7 @@ async def approve_youtube_script(
     produce_task_id: str | None = None
     try:
         from tantra.db.director import AgentTask as _AgentTask
-        from tantra.tasks.celery_app import celery_app
+        from tantra.tasks.celery_app import app as celery_app
 
         # Create AgentTask row to track production
         produce_task = _AgentTask(
@@ -1110,7 +1110,7 @@ async def trigger_youtube_upload(
 
     celery_task_id: str | None = None
     try:
-        from tantra.tasks.celery_app import celery_app
+        from tantra.tasks.celery_app import app as celery_app
 
         # Dispatch upload task directly (no AgentTask wrapper — it's a short terminal operation)
         result = celery_app.send_task(
