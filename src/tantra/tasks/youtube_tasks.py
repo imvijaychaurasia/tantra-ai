@@ -223,6 +223,12 @@ def generate_youtube_script(agent_task_id: str) -> dict[str, Any]:
         # Embed video_type into the script JSON so tantra-media can read it
         # without a DB schema change (stored alongside the scenes data).
         script_data["video_type"] = video_type
+        # Normalise tags: crew may return a CSV string instead of a list
+        _tags_raw = script_data.get("tags", [])
+        if isinstance(_tags_raw, str):
+            _tags_raw = [t.strip() for t in _tags_raw.split(",") if t.strip()]
+        _tags_raw = list(_tags_raw)  # ensure list, not tuple/generator
+
         video = YouTubeVideo(
             agent_task_id=uuid.UUID(agent_task_id),
             plan_id=plan_id,
@@ -230,7 +236,7 @@ def generate_youtube_script(agent_task_id: str) -> dict[str, Any]:
             description=script_data.get("description", ""),
             script=script_data,
             thumbnail_concept=script_data.get("thumbnail_concept", ""),
-            tags=script_data.get("tags", []),
+            tags=_tags_raw,
             topic_hint=topic_hint,
             status="scripted",
             created_at=datetime.utcnow(),
@@ -608,7 +614,16 @@ def upload_youtube_video(youtube_video_id: str) -> dict[str, Any]:
 
         # ── Build video metadata ───────────────────────────────────────────────
         import re as _re
-        raw_tags = list(video.tags or [])
+
+        # video.tags may be stored as a plain string (e.g. "space, nasa, artemis")
+        # when the crew returns CSV instead of a JSON array.
+        # list("space, nasa") → ['s','p','a','c','e',...] which breaks YouTube.
+        # Detect this and split by comma instead.
+        _raw = video.tags or []
+        if isinstance(_raw, str):
+            raw_tags = [t.strip() for t in _raw.split(",") if t.strip()]
+        else:
+            raw_tags = list(_raw)
 
         def _sanitize_tag(t: str) -> str:
             """
@@ -623,9 +638,9 @@ def upload_youtube_video(youtube_video_id: str) -> dict[str, Any]:
             t = _re.sub(r'\s+', ' ', t).strip()
             return t[:30]
 
-        # Sanitize all tags, drop empties
+        # Sanitize all tags, drop empties and single-char tokens
         sanitized = [_sanitize_tag(t) for t in raw_tags]
-        sanitized = [t for t in sanitized if t]
+        sanitized = [t for t in sanitized if len(t) >= 2]
 
         # YouTube enforces a 500-character limit on the tags array joined by commas
         tag_budget = 500
