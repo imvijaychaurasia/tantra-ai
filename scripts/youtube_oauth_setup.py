@@ -112,24 +112,54 @@ def main() -> None:
     for scope in SCOPES:
         print(f"  • {scope}")
 
-    print("\nStarting OAuth flow...")
-    print("A browser window will open. If running headless, copy the URL below.")
-    print()
-
     # ── Run the OAuth flow ────────────────────────────────────────────────────
     flow = InstalledAppFlow.from_client_config(client_config, scopes=SCOPES)
 
-    try:
-        # run_local_server opens a browser and handles the redirect automatically
-        creds = flow.run_local_server(
-            port=0,              # pick a random available port
-            prompt="consent",    # force consent screen so we always get refresh_token
+    # Detect if we have a display available (local machine vs SSH headless)
+    import os as _os
+    has_display = bool(_os.environ.get("DISPLAY") or _os.environ.get("WAYLAND_DISPLAY") or sys.platform == "darwin")
+
+    creds = None
+    if has_display:
+        print("\nStarting OAuth flow — a browser window will open...")
+        print()
+        try:
+            creds = flow.run_local_server(
+                port=0,
+                prompt="consent",
+                access_type="offline",
+            )
+        except Exception as _e:
+            print(f"Browser flow failed ({_e}), switching to headless mode...")
+
+    if creds is None:
+        # ── Headless / SSH fallback ───────────────────────────────────────────
+        # Generate the auth URL, user opens it on any machine (Mac/phone/etc),
+        # approves, then pastes the full redirect URL (which contains the code).
+        auth_url, _ = flow.authorization_url(
+            prompt="consent",
             access_type="offline",
         )
-    except Exception:
-        # Fallback: copy-paste mode (headless servers)
-        print("Browser flow failed — falling back to manual copy-paste mode.")
-        creds = flow.run_console()
+        print("\n" + "─" * 70)
+        print("  HEADLESS MODE — no browser detected (running via SSH)")
+        print("─" * 70)
+        print("\nStep 1: Open this URL on your Mac or any machine with a browser:\n")
+        print(f"  {auth_url}\n")
+        print("Step 2: Sign in with the Google account that OWNS your YouTube channel.")
+        print("        Click 'Allow' on the permissions screen.")
+        print()
+        print("Step 3: You'll be redirected to http://localhost:... which will fail.")
+        print("        That's expected — copy the FULL URL from your browser's address bar.")
+        print()
+        redirect_response = input("Step 4: Paste the full redirect URL here and press Enter:\n> ").strip()
+        print()
+        try:
+            flow.fetch_token(authorization_response=redirect_response)
+            creds = flow.credentials
+        except Exception as exc:
+            print(f"\nERROR exchanging token: {exc}")
+            print("Make sure you pasted the full URL including http://localhost:...?code=...")
+            sys.exit(1)
 
     # ── Extract and display the refresh token ─────────────────────────────────
     refresh_token = creds.refresh_token
