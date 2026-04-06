@@ -134,8 +134,10 @@ def main() -> None:
 
     if creds is None:
         # ── Headless / SSH fallback ───────────────────────────────────────────
-        # Generate the auth URL, user opens it on any machine (Mac/phone/etc),
-        # approves, then pastes the full redirect URL (which contains the code).
+        # Use redirect_uri=urn:ietf:wg:oauth:2.0:oob so Google shows the auth
+        # code directly on the approval page — user copies it and pastes here.
+        # This avoids the missing-redirect_uri 400 error from the previous approach.
+        flow.redirect_uri = "urn:ietf:wg:oauth:2.0:oob"
         auth_url, _ = flow.authorization_url(
             prompt="consent",
             access_type="offline",
@@ -148,17 +150,16 @@ def main() -> None:
         print("Step 2: Sign in with the Google account that OWNS your YouTube channel.")
         print("        Click 'Allow' on the permissions screen.")
         print()
-        print("Step 3: You'll be redirected to http://localhost:... which will fail.")
-        print("        That's expected — copy the FULL URL from your browser's address bar.")
+        print("Step 3: Google shows a page with a short auth code (e.g. 4/0AX4X...). Copy it.")
         print()
-        redirect_response = input("Step 4: Paste the full redirect URL here and press Enter:\n> ").strip()
+        code = input("Step 4: Paste the auth code here and press Enter:\n> ").strip()
         print()
         try:
-            flow.fetch_token(authorization_response=redirect_response)
+            flow.fetch_token(code=code)
             creds = flow.credentials
         except Exception as exc:
             print(f"\nERROR exchanging token: {exc}")
-            print("Make sure you pasted the full URL including http://localhost:...?code=...")
+            print("Make sure you copied the code exactly from the Google approval page.")
             sys.exit(1)
 
     # ── Extract and display the refresh token ─────────────────────────────────
