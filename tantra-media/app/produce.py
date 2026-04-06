@@ -77,7 +77,18 @@ def produce_video(
           total_duration: float (seconds)
           error:          str | None
     """
-    log.info("=== Produce video %s ===", video_id)
+    video_type = script.get("video_type", "slideshow")
+    log.info("=== Produce video %s (type=%s) ===", video_id, video_type)
+
+    # ── Route to appropriate renderer ────────────────────────────────────────
+    # visual_video and marketing_video are reserved for Remotion (Phase 4).
+    # For now fall through to the Pillow+ffmpeg pipeline with a warning.
+    if video_type in ("visual_video", "marketing_video"):
+        log.warning(
+            "video_type=%r → Remotion renderer not yet implemented; "
+            "falling back to Pillow+ffmpeg slideshow pipeline.",
+            video_type,
+        )
 
     scenes = script.get("scenes", [])
     if not scenes:
@@ -123,6 +134,7 @@ def produce_video(
                 video_title=script.get("title", ""),
                 scene_index=idx,
                 total_scenes=len(scenes),
+                video_type=video_type,
             )
         else:
             log.debug("Image skip (exists): %s", image_path.name)

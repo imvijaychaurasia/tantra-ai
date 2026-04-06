@@ -120,6 +120,7 @@ def build_youtube_crew(
     topic_hint: str = "",
     director_guidance: str = "",
     channel_context: str = "",
+    video_type: str = "slideshow",
     recent_video_titles: Optional[list[str]] = None,
     verbose: bool = True,
     agent_task_id: str = "",
@@ -145,6 +146,36 @@ def build_youtube_crew(
         "Cyber GyanSagar — educational content on technology, science, AI, space, and engineering. "
         "Audience: curious learners, students, engineers, and tech enthusiasts globally."
     )
+
+    # ── Video type guidance injected into relevant tasks ──────────────────────
+    _VIDEO_TYPE_GUIDANCE = {
+        "slideshow": (
+            "Output format: text-slide video. Narration is TTS audio. "
+            "Visual prompts describe on-screen text/diagram concepts. Keep narration concise."
+        ),
+        "product_video": (
+            "Output format: product showcase. Demonstrate Tantra AI features with specific "
+            "CLI commands, benchmarks, and real use cases. Narration is first-person builder voice. "
+            "Each scene has a clear feature being demonstrated."
+        ),
+        "educational": (
+            "Output format: pure educational explainer. NO product mentions, NO brand plugs. "
+            "Facts, explanations, and examples only. Neutral authoritative tone. "
+            "Cite sources in narration where possible."
+        ),
+        "visual_video": (
+            "Output format: cinematic/ad-style video (will be rendered with Remotion). "
+            "Write rich visual_prompt descriptions for every scene — these will be used for "
+            "AI image generation or stock footage. Emotionally engaging narration. "
+            "Scenes should be visually distinct and compelling."
+        ),
+        "marketing_video": (
+            "Output format: brand marketing video. Story-driven, emotionally led. "
+            "Hook with a relatable pain point, build tension, deliver the brand as the hero. "
+            "CTA is strong and specific."
+        ),
+    }
+    video_type_note = _VIDEO_TYPE_GUIDANCE.get(video_type, _VIDEO_TYPE_GUIDANCE["slideshow"])
 
     # ── Topic Researcher ──────────────────────────────────────────────────────
     researcher = Agent(
@@ -236,20 +267,30 @@ def build_youtube_crew(
     # Tasks
     # ---------------------------------------------------------------------------
 
-    topic_directive = (
-        f"\n\nTopic from Director: {topic_hint}" if topic_hint else ""
-    )
+    # When a topic_hint is explicitly provided by the Director, it is the PRIMARY
+    # directive. Channel context is secondary and must NOT override the topic.
+    if topic_hint:
+        topic_directive = (
+            f"\n\nMANDATORY TOPIC (do not change or reframe this): {topic_hint}\n"
+            "The video MUST be about this exact topic. Do not substitute, blend, or "
+            "pivot to a different subject. Channel background context is provided below "
+            "only for tone/audience guidance — it does NOT change the topic."
+        )
+    else:
+        topic_directive = ""
+
     guidance_directive = (
         f"\n\nTone guidance: {director_guidance}" if director_guidance else ""
     )
 
     task_research = Task(
         description=(
-            f"Research YouTube trends and competitor content for the following:\n"
-            f"Channel focus: {channel_ctx}\n"
+            f"Research YouTube trends and competitor content for the following topic.\n"
+            + (f"MANDATORY TOPIC: {topic_hint}\n" if topic_hint else "")
+            + f"Channel audience context (for tone only): {channel_ctx}\n"
             f"Recent videos (avoid repetition):\n{recent_str}"
             + topic_directive
-            + "\n\nDeliver: a structured brief with 3 potential video angles, "
+            + "\n\nDeliver: a structured brief with 3 potential video angles ON THE ABOVE TOPIC, "
             "audience pain points each angle addresses, and what makes each unique "
             "compared to existing YouTube content."
         ),
@@ -272,8 +313,11 @@ def build_youtube_crew(
             "b_roll_description (human-readable footage description), "
             "duration_seconds, type (hook/content/transition/cta/outro)\n"
             "- Hook scene: must grab attention in first 15 seconds\n"
-            "- CTA: specific, genuine — subscriber growth / build-in-public theme\n"
-            "- Narration must be conversational and match the builder/authentic brand voice"
+            "- CTA: specific, genuine — subscriber growth theme\n"
+            "- Narration must be conversational and educational\n"
+            + (f"- MANDATORY: The entire script must stay on topic: {topic_hint}. "
+               "Do NOT pivot to other products or brands.\n" if topic_hint else "")
+            + f"- Video type ({video_type}): {video_type_note}\n"
             + guidance_directive
         ),
         expected_output=(

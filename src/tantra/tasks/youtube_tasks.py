@@ -141,6 +141,7 @@ def generate_youtube_script(agent_task_id: str) -> dict[str, Any]:
         topic_hint = task.instructions or ""
         context = task.context or {}
         director_guidance = context.get("tone_override", "")
+        video_type = context.get("video_type", "slideshow")  # label:xxx from director chat
         plan_id = task.plan_id
 
         # ── Step 2: Check checkpoint ──────────────────────────────────────────
@@ -150,15 +151,27 @@ def generate_youtube_script(agent_task_id: str) -> dict[str, Any]:
             # ── Step 3: Run YouTubeCrew ───────────────────────────────────────
             from tantra.crews.youtube_crew import build_youtube_crew, parse_script_output
 
-            # Gather live context for crew
+            # Gather live context for crew.
+            # When topic_hint is explicitly set, skip weekly-plan channel_context so it
+            # doesn't contaminate the topic with "Building Tantra AI" framing.
             recent_titles = _get_recent_video_titles(session)
-            channel_context = _get_channel_context(session)
+            if topic_hint:
+                channel_context = (
+                    "Cyber GyanSagar — educational content on technology, science, AI, "
+                    "space, and engineering. Audience: curious learners aged 20-40."
+                )
+            else:
+                channel_context = _get_channel_context(session)
 
-            logger.info("generate_youtube_script: launching YouTubeCrew for topic=%r", topic_hint)
+            logger.info(
+                "generate_youtube_script: launching YouTubeCrew topic=%r video_type=%r",
+                topic_hint, video_type,
+            )
             crew = build_youtube_crew(
                 topic_hint=topic_hint,
                 director_guidance=director_guidance,
                 channel_context=channel_context,
+                video_type=video_type,
                 recent_video_titles=recent_titles,
                 verbose=True,
                 agent_task_id=agent_task_id,
@@ -207,6 +220,9 @@ def generate_youtube_script(agent_task_id: str) -> dict[str, Any]:
                     raise ValueError("Checkpoint raw output could not be parsed on retry")
 
         # ── Step 6: Create YouTubeVideo row ──────────────────────────────────
+        # Embed video_type into the script JSON so tantra-media can read it
+        # without a DB schema change (stored alongside the scenes data).
+        script_data["video_type"] = video_type
         video = YouTubeVideo(
             agent_task_id=uuid.UUID(agent_task_id),
             plan_id=plan_id,

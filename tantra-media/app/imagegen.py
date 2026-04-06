@@ -133,6 +133,7 @@ def generate_scene_image(
     video_title: str = "",
     scene_index: int = 0,
     total_scenes: int = 0,
+    video_type: str = "slideshow",
 ) -> None:
     """
     Generate a 1920×1080 styled slide image for a YouTube script scene.
@@ -153,30 +154,11 @@ def generate_scene_image(
     _draw_gradient_bg(draw)
     _draw_accent_lines(draw)
 
-    # ── Scene type badge ───────────────────────────────────────────────────
-    scene_type = scene.get("type", "content").lower()
-    badge_color = BADGE_COLORS.get(scene_type, ACCENT)
-    badge_text = scene_type.upper()
-    badge_font = _load_font(bold=True, size=28)
-    badge_padding = 16
-    dummy_img = Image.new("RGB", (1, 1))
-    dummy_draw = ImageDraw.Draw(dummy_img)
-    bbox = dummy_draw.textbbox((0, 0), badge_text, font=badge_font)
-    badge_w = bbox[2] - bbox[0] + badge_padding * 2
-    badge_h = bbox[3] - bbox[1] + badge_padding
-    badge_x, badge_y = 80, 80
-    draw.rounded_rectangle(
-        [badge_x, badge_y, badge_x + badge_w, badge_y + badge_h],
-        radius=6, fill=badge_color,
-    )
-    draw.text((badge_x + badge_padding, badge_y + badge_padding // 2),
-              badge_text, font=badge_font, fill=(10, 10, 10))
-
-    # ── Scene counter ──────────────────────────────────────────────────────
+    # ── Scene counter (top right only — no type badge) ────────────────────
     if total_scenes:
         counter_font = _load_font(bold=False, size=28)
         counter_text = f"{scene_index + 1} / {total_scenes}"
-        draw.text((W - 160, 88), counter_text, font=counter_font, fill=DIM)
+        draw.text((W - 160, 48), counter_text, font=counter_font, fill=DIM)
 
     # ── Main title / visual prompt (large) ─────────────────────────────────
     visual_prompt = scene.get("visual_prompt", "")
@@ -191,7 +173,7 @@ def generate_scene_image(
     MARGIN = 100
     content_width = W - MARGIN * 2
 
-    y = 200
+    y = 120  # moved up since badge is gone
 
     # Visual prompt as hero text
     if visual_prompt:
@@ -236,10 +218,11 @@ def generate_scene_image(
                 ty += (bb[3] - bb[1]) + 8
             y = ty + box_padding + 20
 
-    # ── Bottom watermark ───────────────────────────────────────────────────
+    # ── Bottom watermark — uses video_title channel context ───────────────
     wm_font = _load_font(bold=False, size=26)
-    wm_text = "Tantra AI  ·  तंत्र"
-    draw.text((W - 300, H - 60), wm_text, font=wm_font, fill=DIM)
+    # Show channel name from video_title prefix if available, else generic brand
+    wm_text = video_title[:60] if video_title else "Cyber GyanSagar"
+    draw.text((MARGIN, H - 60), wm_text, font=wm_font, fill=DIM)
 
     # Save
     img.save(str(output_path), "PNG", optimize=True)
