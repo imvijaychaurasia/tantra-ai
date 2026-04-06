@@ -1357,10 +1357,15 @@ async def _handle_chat_approval(director, history: list[dict], r, session_id: st
         '    "task_type": "research_draft|progress_post|youtube_script|youtube_produce|youtube_publish|analytics_review",\n'
         '    "assigned_to": "social_crew|youtube_crew|media_crew|cmo|cto|director",\n'
         '    "priority": "high|medium|low",\n'
-        '    "instructions": "<exact instructions from our conversation>",\n'
-        '    "context": {"topic_hint": "<optional topic hint>"}\n'
+        '    "instructions": "<CONCISE 1-sentence task directive. NO multi-line text. NO embedded quotes. NO newlines. Max 120 characters.>",\n'
+        '    "context": {"topic_hint": "<topic or subject in one short line — no newlines>"}\n'
         "  }\n"
         "]\n\n"
+        "CRITICAL JSON RULES:\n"
+        "- instructions MUST be a single-line string, max 120 characters\n"
+        "- Do NOT copy verbatim text from the conversation into instructions\n"
+        "- Summarise the task intent in plain short English\n"
+        "- All strings must be valid JSON — no unescaped newlines, no unescaped quotes\n"
         "If the conversation contains NO tasks at all (e.g. it was purely informational), return [].\n"
         "For youtube_script tasks, set assigned_to to youtube_crew."
     )
