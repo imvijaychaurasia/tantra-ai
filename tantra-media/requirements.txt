@@ -5,13 +5,12 @@ fastapi==0.115.0
 uvicorn[standard]==0.30.6
 pydantic==2.9.2
 
-# TTS — Kokoro TTS (open-source, neural quality, fully local, no API key)
-kokoro-onnx>=0.4.0
-soundfile>=0.12.1
+# TTS — gTTS (Google Text-to-Speech, free, no API key, works from server IPs)
+gTTS>=2.5.0
 
 # Image generation — Pillow for styled slide images
 Pillow==10.4.0
-numpy>=2.0.2
+numpy>=1.26.4
 
 # HTTP client (for health checks)
 httpx==0.27.2
