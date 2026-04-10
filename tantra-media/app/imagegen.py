@@ -3,20 +3,20 @@ tantra-media — Image generation
 तंत्र  ·  Styled tech-slide images for YouTube scenes
 
 Generates 1920×1080 dark-themed slide images for each scene.
-No GPU required — pure Pillow (CPU).
 
-Design language:
-  - Dark gradient background (#0a0e1a → #1a1f35, tech-dark)
-  - Scene type badge (HOOK / CONTENT / CTA / OUTRO)
-  - Large scene title (top third)
-  - Visual description as body text (middle)
+Two rendering modes:
+  1. Pillow (default / fallback) — pure CPU, dark gradient background.
+  2. AI composite (visual_video) — Flux.1-dev background via ComfyUI, with
+     a semi-transparent dark overlay + Pillow text composited on top.
+     Activated by passing a pre-generated PIL.Image as `ai_background`.
+
+Design language (both modes):
+  - Dark gradient / AI background (#0a0e1a → #1a1f35 tone for Pillow)
+  - Large scene visual_prompt / narration excerpt
   - On-screen text highlight box (if present)
-  - Scene number indicator
-  - Tantra AI / तंत्र watermark (bottom right)
+  - Scene number indicator (top right)
+  - Channel watermark (bottom left)
   - Cyan accent lines for tech feel
-
-The visual_prompt is rendered as on-screen descriptive text so the
-viewer can understand the intended b-roll even before real footage is cut.
 """
 from __future__ import annotations
 
@@ -127,6 +127,26 @@ def _draw_text_block(
     return y
 
 
+def _composite_ai_background(ai_background: Image.Image) -> Image.Image:
+    """
+    Prepare an AI-generated background for text overlay.
+
+    Steps:
+      1. Resize / crop to exactly 1920×1080 (LANCZOS).
+      2. Apply a semi-transparent dark overlay so white text remains legible
+         regardless of background brightness.
+
+    Returns a plain RGB PIL.Image ready for Pillow text drawing.
+    """
+    bg = ai_background.convert("RGB").resize((W, H), Image.LANCZOS)
+
+    # Dark overlay — 55% opacity gives enough contrast without losing the visual
+    overlay = Image.new("RGBA", (W, H), (0, 0, 0, 140))  # 140 / 255 ≈ 55%
+    bg_rgba = bg.convert("RGBA")
+    bg_rgba.alpha_composite(overlay)
+    return bg_rgba.convert("RGB")
+
+
 def generate_scene_image(
     scene: dict,
     output_path: Path,
@@ -134,24 +154,36 @@ def generate_scene_image(
     scene_index: int = 0,
     total_scenes: int = 0,
     video_type: str = "slideshow",
+    ai_background: Optional[Image.Image] = None,
 ) -> None:
     """
     Generate a 1920×1080 styled slide image for a YouTube script scene.
 
     Args:
-        scene:        Scene dict from script JSON (id, type, narration, visual_prompt, etc.)
-        output_path:  Where to write the PNG file.
-        video_title:  Overall video title for watermark context.
-        scene_index:  0-based index (for scene counter).
-        total_scenes: Total number of scenes (for progress indicator).
+        scene:          Scene dict from script JSON (id, type, narration, visual_prompt, …).
+        output_path:    Where to write the PNG file.
+        video_title:    Overall video title for watermark context.
+        scene_index:    0-based index (for scene counter).
+        total_scenes:   Total number of scenes (for progress indicator).
+        video_type:     Used for future style hints.
+        ai_background:  Optional pre-generated Flux.1-dev image (PIL.Image).
+                        If provided, it is used as the background instead of the
+                        Pillow dark gradient — enables the visual_video AI mode.
+                        Must be roughly 1280×720 or any size; will be resized to 1920×1080.
     """
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    img = Image.new("RGB", (W, H), BG_TOP)
+    # ── Background ─────────────────────────────────────────────────────────
+    if ai_background is not None:
+        img = _composite_ai_background(ai_background)
+        log.info("AI background composite ✓ scene %d/%d", scene_index + 1, total_scenes)
+    else:
+        img = Image.new("RGB", (W, H), BG_TOP)
+        draw_tmp = ImageDraw.Draw(img)
+        _draw_gradient_bg(draw_tmp)
+
     draw = ImageDraw.Draw(img)
 
-    # ── Background ─────────────────────────────────────────────────────────
-    _draw_gradient_bg(draw)
     _draw_accent_lines(draw)
 
     # ── Scene counter (top right only — no type badge) ────────────────────

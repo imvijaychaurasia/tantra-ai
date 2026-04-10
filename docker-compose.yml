@@ -458,6 +458,17 @@ services:
       TANTRA_MEDIA_DIR: /data/media
       TANTRA_MEDIA_VOICE: ${TANTRA_MEDIA_VOICE:-am_adam}
       TANTRA_MEDIA_SPEECH_RATE: ${TANTRA_MEDIA_SPEECH_RATE:-+5%}
+      # ComfyUI connection (Phase 3d — visual_video AI backgrounds)
+      COMFYUI_URL: ${COMFYUI_URL:-http://tantra-comfyui:8188}
+      COMFYUI_ENABLED: ${COMFYUI_ENABLED:-true}
+      COMFYUI_MODEL: ${COMFYUI_MODEL:-flux1-dev.safetensors}
+      COMFYUI_CLIP_T5: ${COMFYUI_CLIP_T5:-t5xxl_fp8_e4m3fn.safetensors}
+      COMFYUI_CLIP_L: ${COMFYUI_CLIP_L:-clip_l.safetensors}
+      COMFYUI_VAE: ${COMFYUI_VAE:-ae.safetensors}
+      COMFYUI_STEPS: ${COMFYUI_STEPS:-20}
+      COMFYUI_WIDTH: ${COMFYUI_WIDTH:-1280}
+      COMFYUI_HEIGHT: ${COMFYUI_HEIGHT:-720}
+      COMFYUI_TIMEOUT: ${COMFYUI_TIMEOUT:-180}
     networks:
       tantra-net:
         ipv4_address: 172.28.0.50
@@ -467,6 +478,46 @@ services:
       timeout: 10s
       retries: 3
       start_period: 20s
+
+  # ---------------------------------------------------------------------------
+  # 14. COMFYUI — Flux.1-dev image generation for visual_video scenes (Phase 3d)
+  #     Access: http://localhost:8188
+  #     ComfyUI GUI: http://localhost:8188 (browser)
+  #
+  #     Required models (download to ./data/comfyui/models/):
+  #       diffusion_models/flux1-dev.safetensors  — Flux UNET fp16 (24 GB)
+  #           OR fp8 variant (~12 GB) named identically
+  #       vae/ae.safetensors                       — Flux VAE
+  #       clip/t5xxl_fp8_e4m3fn.safetensors        — T5 text encoder fp8
+  #       clip/clip_l.safetensors                  — CLIP-L text encoder
+  #
+  #     VRAM note: fp8 UNET + VAE + T5 fp8 ≈ 14–15 GB (fits RTX 5070 Ti 16 GB)
+  #     GPU passthrough: enabled via docker-compose.nvidia.yml override
+  #
+  #     Called by tantra-media service for visual_video type videos.
+  #     Set COMFYUI_ENABLED=false in .env to use Pillow fallback globally.
+  # ---------------------------------------------------------------------------
+  comfyui:
+    <<: *restart
+    image: yanwk/comfyui-boot:cu124
+    container_name: tantra-comfyui
+    volumes:
+      - ./data/comfyui/models:/root/ComfyUI/models          # model weights
+      - ./data/comfyui/output:/root/ComfyUI/output          # generated images
+      - ./data/comfyui/custom_nodes:/root/ComfyUI/custom_nodes  # extensions
+    ports:
+      - "${COMFYUI_PORT:-8188}:8188"
+    environment:
+      CLI_ARGS: "--listen 0.0.0.0 --port 8188"
+    networks:
+      tantra-net:
+        ipv4_address: 172.28.0.51
+    healthcheck:
+      test: ["CMD-SHELL", "python3 -c \"import urllib.request; urllib.request.urlopen('http://localhost:8188/system_stats')\" 2>/dev/null || exit 1"]
+      interval: 30s
+      timeout: 15s
+      retries: 5
+      start_period: 120s    # ComfyUI takes ~60-90s to start with large models
 
 # =============================================================================
 # NVIDIA GPU override (Linux only):

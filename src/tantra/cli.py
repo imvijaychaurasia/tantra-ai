@@ -1404,161 +1404,166 @@ async def _handle_chat_approval(director, history: list[dict], r, session_id: st
         return
 
     if not tasks_raw:
-        console.print("[dim]No tasks found in the conversation to commit.[/dim]")
-        return
+        console.print("[dim]No AgentTasks found in the conversation to commit.[/dim]")
+        # Fall through to the video approval block below — the user may have typed
+        # 'approve' specifically to approve a scripted video with no AgentTasks pending.
+        # We skip the DB insertion section but still run the YouTube approval check.
 
-    # ── Validate task_type against the Celery handlers that actually exist ────
-    _VALID_TASK_TYPES = {
-        # Phase 1 — LinkedIn
-        "research_draft",
-        "progress_post",
-        # Phase 2 — Analytics
-        "analytics_review",
-        # Phase 3 — YouTube
-        "youtube_script",    # director chat → YouTubeCrew → script → n8n approval
-        "youtube_produce",   # tantra-media → TTS + video/images + assembly (Phase 3b)
-        "youtube_publish",   # YouTube Data API upload (Phase 3c)
-    }
-    _VALID_ASSIGNED_TO = {"social_crew", "youtube_crew", "media_crew", "cmo", "cto", "director"}
+    # ── Validate + DB-insert AgentTasks (only when tasks were extracted) ─────
+    # If tasks_raw is empty we skip this block entirely and fall through to the
+    # video approval section — that way a bare 'approve' still approves scripted
+    # YouTube videos even when there are no AgentTask items to commit.
+    if tasks_raw:
+        _VALID_TASK_TYPES = {
+            # Phase 1 — LinkedIn
+            "research_draft",
+            "progress_post",
+            # Phase 2 — Analytics
+            "analytics_review",
+            # Phase 3 — YouTube
+            "youtube_script",    # director chat → YouTubeCrew → script → n8n approval
+            "youtube_produce",   # tantra-media → TTS + video/images + assembly (Phase 3b)
+            "youtube_publish",   # YouTube Data API upload (Phase 3c)
+        }
+        _VALID_ASSIGNED_TO = {"social_crew", "youtube_crew", "media_crew", "cmo", "cto", "director"}
 
-    valid_tasks = []
-    skipped_tasks = []
-    for t in tasks_raw:
-        tt = t.get("task_type", "")
-        if tt not in _VALID_TASK_TYPES:
-            skipped_tasks.append(t)
-            continue
-        # Normalise assigned_to to a known value; fall back to social_crew
-        at = t.get("assigned_to", "social_crew")
-        if at not in _VALID_ASSIGNED_TO:
-            t["assigned_to"] = "social_crew"
-        valid_tasks.append(t)
+        valid_tasks = []
+        skipped_tasks = []
+        for t in tasks_raw:
+            tt = t.get("task_type", "")
+            if tt not in _VALID_TASK_TYPES:
+                skipped_tasks.append(t)
+                continue
+            # Normalise assigned_to to a known value; fall back to social_crew
+            at = t.get("assigned_to", "social_crew")
+            if at not in _VALID_ASSIGNED_TO:
+                t["assigned_to"] = "social_crew"
+            valid_tasks.append(t)
 
-    if skipped_tasks:
-        console.print(
-            f"\n[yellow]⚠ Skipped {len(skipped_tasks)} task(s) — task_type not supported by any Celery handler:[/yellow]"
-        )
-        for t in skipped_tasks:
-            console.print(f"  [dim]× {t.get('task_type', '?')}[/dim]")
-        console.print(
-            "[dim]Supported types: [cyan]research_draft[/cyan], [cyan]progress_post[/cyan], "
-            "[cyan]youtube_script[/cyan], [cyan]analytics_review[/cyan]\n"
-            "Phase 3 tasks (YouTube production, Instagram posts, X threads) don't have "
-            "Celery handlers yet — they'll be added when Phase 3 is built.[/dim]"
-        )
-
-    if not valid_tasks:
-        console.print(
-            "[yellow]No executable tasks to commit.[/yellow]\n"
-            "[dim]Use specific task types the system can execute. "
-            "Discussion tasks and strategy planning aren't AgentTasks — they're conversation.[/dim]"
-        )
-        return
-
-    console.print(f"\n[bold]Tasks to create ([cyan]{len(valid_tasks)}[/cyan]):[/bold]")
-    for i, t in enumerate(valid_tasks, 1):
-        console.print(
-            f"  [dim]{i}.[/dim] [cyan]{t.get('task_type', '?')}[/cyan] "
-            f"[{t.get('priority', 'medium')}]  "
-            f"[dim]{t.get('instructions', '')[:80]}[/dim]"
-        )
-
-    try:
-        from datetime import datetime, timedelta
-
-        from sqlalchemy import create_engine, select
-        from sqlalchemy.orm import sessionmaker
-        from tantra.core.config import settings
-        from tantra.db.director import AgentTask, WeeklyPlan
-
-        engine = create_engine(settings.database_sync_url, echo=False)
-        DBSession = sessionmaker(bind=engine)
-        with DBSession() as db_session:
-            plan = db_session.execute(
-                select(WeeklyPlan)
-                .where(WeeklyPlan.status == "active")
-                .order_by(WeeklyPlan.week_start.desc())
-                .limit(1)
-            ).scalar_one_or_none()
-
-            now = datetime.utcnow()
-            created_count = 0
-            skipped_dedup = []
-            for t in valid_tasks:
-                task_type = t.get("task_type", "research_draft")
-                # ── DB-level dedup guard ──────────────────────────────────────
-                # Block double-insert: if a pending/in_progress task of the same
-                # type was created within the last 30 minutes (same chat session
-                # window), skip it.  This catches cases where the LLM ignores the
-                # [COMMITTED] note despite the extraction prompt warning.
-                recent_cutoff = now - timedelta(minutes=30)
-                existing = db_session.execute(
-                    select(AgentTask)
-                    .where(AgentTask.task_type == task_type)
-                    .where(AgentTask.status.in_(["pending", "in_progress"]))
-                    .where(AgentTask.scheduled_for >= recent_cutoff)
-                    .limit(1)
-                ).scalar_one_or_none()
-                if existing:
-                    skipped_dedup.append(task_type)
-                    continue
-                # ─────────────────────────────────────────────────────────────
-                db_session.add(AgentTask(
-                    plan_id=plan.id if plan else None,
-                    task_type=task_type,
-                    assigned_to=t.get("assigned_to", "social_crew"),
-                    priority=t.get("priority", "medium"),
-                    instructions=t.get("instructions", ""),
-                    context=t.get("context", {}),
-                    scheduled_for=now,
-                    status="pending",
-                ))
-                created_count += 1
-            db_session.commit()
-
-        if skipped_dedup:
+        if skipped_tasks:
             console.print(
-                f"\n[yellow]⚠ Skipped {len(skipped_dedup)} duplicate task(s) "
-                f"(already pending within last 30 min):[/yellow] "
-                + ", ".join(skipped_dedup)
+                f"\n[yellow]⚠ Skipped {len(skipped_tasks)} task(s) — task_type not supported by any Celery handler:[/yellow]"
             )
-        if created_count == 0 and skipped_dedup:
-            console.print("[dim]Nothing new to commit — all tasks already queued.[/dim]")
-            return
+            for t in skipped_tasks:
+                console.print(f"  [dim]× {t.get('task_type', '?')}[/dim]")
+            console.print(
+                "[dim]Supported types: [cyan]research_draft[/cyan], [cyan]progress_post[/cyan], "
+                "[cyan]youtube_script[/cyan], [cyan]analytics_review[/cyan][/dim]"
+            )
 
-        console.print(
-            f"\n[green]✓[/green] Created [cyan]{created_count}[/cyan] AgentTask(s) → pending.\n"
-            "[dim]Dispatch now:[/dim]  "
-            "[cyan]tantra task run dispatch_due_tasks --wait[/cyan]"
-        )
+        if not valid_tasks:
+            console.print(
+                "[yellow]No executable AgentTasks to commit.[/yellow]\n"
+                "[dim]Use specific task types the system can execute. "
+                "Discussion tasks and strategy planning aren't AgentTasks — they're conversation.[/dim]"
+            )
+            # No valid AgentTasks but still fall through to the video approval block
 
-        # ── Inject a committed-note into conversation history ─────────────────
-        # This prevents the NEXT approval trigger in the same session from
-        # re-extracting and re-creating the exact same tasks.
-        # The Director will see this note and return [] on the next extraction.
-        # Only include actually-created tasks in the committed note (not dedup-skipped ones)
-        committed_tasks_for_note = [t for t in valid_tasks if t.get("task_type") not in skipped_dedup]
-        committed_summary = ", ".join(
-            f"{t.get('task_type')} ({t.get('priority','medium')})"
-            for t in committed_tasks_for_note
-        ) or "none (all were duplicates)"
-        history.append({
-            "role": "assistant",
-            "content": (
-                f"[COMMITTED] Tasks already created in DB: {committed_summary}. "
-                "These are now pending dispatch — do NOT extract them again. "
-                "Only create new tasks if the user explicitly requests something different."
-            ),
-        })
-        # Persist updated history so the note survives a resume
-        history_key = f"tantra:director:chat:{session_id}:history"
-        try:
-            r.setex(history_key, chat_ttl, json.dumps(history))
-        except Exception:
-            pass
+        else:
+            console.print(f"\n[bold]Tasks to create ([cyan]{len(valid_tasks)}[/cyan]):[/bold]")
+            for i, t in enumerate(valid_tasks, 1):
+                console.print(
+                    f"  [dim]{i}.[/dim] [cyan]{t.get('task_type', '?')}[/cyan] "
+                    f"[{t.get('priority', 'medium')}]  "
+                    f"[dim]{t.get('instructions', '')[:80]}[/dim]"
+                )
 
-    except Exception as exc:
-        console.print(f"[red]DB error creating tasks: {exc}[/red]")
+            try:
+                from datetime import datetime, timedelta
+
+                from sqlalchemy import create_engine, select
+                from sqlalchemy.orm import sessionmaker
+                from tantra.core.config import settings
+                from tantra.db.director import AgentTask, WeeklyPlan
+
+                engine = create_engine(settings.database_sync_url, echo=False)
+                DBSession = sessionmaker(bind=engine)
+                with DBSession() as db_session:
+                    plan = db_session.execute(
+                        select(WeeklyPlan)
+                        .where(WeeklyPlan.status == "active")
+                        .order_by(WeeklyPlan.week_start.desc())
+                        .limit(1)
+                    ).scalar_one_or_none()
+
+                    now = datetime.utcnow()
+                    created_count = 0
+                    skipped_dedup = []
+                    for t in valid_tasks:
+                        task_type = t.get("task_type", "research_draft")
+                        # ── DB-level dedup guard ──────────────────────────────────────
+                        # Block double-insert: if a pending/in_progress task of the same
+                        # type was created within the last 30 minutes (same chat session
+                        # window), skip it.  This catches cases where the LLM ignores the
+                        # [COMMITTED] note despite the extraction prompt warning.
+                        recent_cutoff = now - timedelta(minutes=30)
+                        existing = db_session.execute(
+                            select(AgentTask)
+                            .where(AgentTask.task_type == task_type)
+                            .where(AgentTask.status.in_(["pending", "in_progress"]))
+                            .where(AgentTask.scheduled_for >= recent_cutoff)
+                            .limit(1)
+                        ).scalar_one_or_none()
+                        if existing:
+                            skipped_dedup.append(task_type)
+                            continue
+                        # ─────────────────────────────────────────────────────────────
+                        db_session.add(AgentTask(
+                            plan_id=plan.id if plan else None,
+                            task_type=task_type,
+                            assigned_to=t.get("assigned_to", "social_crew"),
+                            priority=t.get("priority", "medium"),
+                            instructions=t.get("instructions", ""),
+                            context=t.get("context", {}),
+                            scheduled_for=now,
+                            status="pending",
+                        ))
+                        created_count += 1
+                    db_session.commit()
+
+                if skipped_dedup:
+                    console.print(
+                        f"\n[yellow]⚠ Skipped {len(skipped_dedup)} duplicate task(s) "
+                        f"(already pending within last 30 min):[/yellow] "
+                        + ", ".join(skipped_dedup)
+                    )
+                if created_count == 0 and skipped_dedup:
+                    console.print("[dim]Nothing new to commit — all tasks already queued.[/dim]")
+                    # Fall through to video approval even if all tasks are dupes
+
+                else:
+                    console.print(
+                        f"\n[green]✓[/green] Created [cyan]{created_count}[/cyan] AgentTask(s) → pending.\n"
+                        "[dim]Dispatch now:[/dim]  "
+                        "[cyan]tantra task run dispatch_due_tasks --wait[/cyan]"
+                    )
+
+                # ── Inject a committed-note into conversation history ─────────────────
+                # This prevents the NEXT approval trigger in the same session from
+                # re-extracting and re-creating the exact same tasks.
+                # Only include actually-created tasks in the committed note (not dedup-skipped ones)
+                committed_tasks_for_note = [t for t in valid_tasks if t.get("task_type") not in skipped_dedup]
+                committed_summary = ", ".join(
+                    f"{t.get('task_type')} ({t.get('priority','medium')})"
+                    for t in committed_tasks_for_note
+                ) or "none (all were duplicates)"
+                history.append({
+                    "role": "assistant",
+                    "content": (
+                        f"[COMMITTED] Tasks already created in DB: {committed_summary}. "
+                        "These are now pending dispatch — do NOT extract them again. "
+                        "Only create new tasks if the user explicitly requests something different."
+                    ),
+                })
+                # Persist updated history so the note survives a resume
+                history_key = f"tantra:director:chat:{session_id}:history"
+                try:
+                    r.setex(history_key, chat_ttl, json.dumps(history))
+                except Exception:
+                    pass
+
+            except Exception as exc:
+                console.print(f"[red]DB error creating tasks: {exc}[/red]")
 
     # ── Video approval step ───────────────────────────────────────────────────
     # After AgentTask dispatch, check for scripted YouTube videos.

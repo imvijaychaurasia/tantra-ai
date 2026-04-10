@@ -165,10 +165,12 @@ def build_youtube_crew(
             "Cite sources in narration where possible."
         ),
         "visual_video": (
-            "Output format: cinematic/ad-style video (will be rendered with Remotion). "
-            "Write rich visual_prompt descriptions for every scene — these will be used for "
-            "AI image generation or stock footage. Emotionally engaging narration. "
-            "Scenes should be visually distinct and compelling."
+            "Output format: cinematic video rendered with Flux.1-dev AI backgrounds. "
+            "Write detailed, evocative visual_prompt descriptions for EVERY scene — these are "
+            "passed directly to Flux.1-dev for image generation, so be specific: describe lighting, "
+            "composition, colours, textures, mood. Dark tech aesthetic. No text in prompts. "
+            "Emotionally engaging narration. Scenes should be visually distinct and compelling. "
+            "Aim for 8-12 scenes with clear visual transitions."
         ),
         "marketing_video": (
             "Output format: brand marketing video. Story-driven, emotionally led. "

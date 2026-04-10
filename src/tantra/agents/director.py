@@ -197,7 +197,7 @@ Recognised labels (extract as video_type in the task context):
   - label:slideshow      → Default. Pillow-rendered text slides + TTS audio. Fast, MVP quality.
   - label:product_video  → Tantra AI product showcase. Slides with Tantra branding + demo narration.
   - label:educational    → Pure educational content. No product references. Facts and explanations only.
-  - label:visual_video   → (Future) Remotion-based cinematic/ad-style video. Rich visuals. React templates.
+  - label:visual_video   → Cinematic video with AI-generated backgrounds (Flux.1-dev via ComfyUI). Rich per-scene visuals composited with text. Use for visually-driven explainers, product showcases, and content where a strong aesthetic matters.
   - label:marketing_video → Brand ad or promotional piece. Story-driven, emotionally led.
 If no label is provided, default to label:slideshow.
 When extracting tasks, include "video_type": "<label_value>" in the context field.

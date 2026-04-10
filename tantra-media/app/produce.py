@@ -4,11 +4,19 @@ tantra-media — Production orchestrator
 
 Production pipeline for a single video:
   1. For each scene in script.scenes:
-     a. TTS: narration → audio/scene_N.mp3
+     a. TTS:   narration → audio/scene_N.mp3
      b. Image: visual_prompt → images/scene_N.png
-     c. Clip: audio + image → clips/scene_N.mp4
+        • slideshow (default) — Pillow dark-gradient slide
+        • visual_video        — Flux.1-dev AI background via ComfyUI + Pillow overlay
+     c. Clip:  audio + image → clips/scene_N.mp4
   2. Thumbnail: thumbnail_prompt → images/thumbnail.png
   3. Concat: all clips → output/{video_id}.mp4
+
+visual_video AI pipeline:
+  - Requires ComfyUI running at COMFYUI_URL (default: http://tantra-comfyui:8188)
+  - Flux.1-dev models in ComfyUI models directory (see comfyui_client.py for layout)
+  - Automatic Pillow fallback if ComfyUI is unavailable or COMFYUI_ENABLED=false
+  - RTX 5070 Ti 16 GB: Flux.1-dev fp8 at 1280×720 ≈ 14–15 GB VRAM
 
 File layout (all under BASE_DIR = /data/media):
   audio/{video_id}/scene_{id}.mp3
@@ -80,15 +88,24 @@ def produce_video(
     video_type = script.get("video_type", "slideshow")
     log.info("=== Produce video %s (type=%s) ===", video_id, video_type)
 
-    # ── Route to appropriate renderer ────────────────────────────────────────
-    # visual_video and marketing_video are reserved for Remotion (Phase 4).
-    # For now fall through to the Pillow+ffmpeg pipeline with a warning.
-    if video_type in ("visual_video", "marketing_video"):
-        log.warning(
-            "video_type=%r → Remotion renderer not yet implemented; "
-            "falling back to Pillow+ffmpeg slideshow pipeline.",
-            video_type,
-        )
+    # ── AI image generation client (visual_video only) ────────────────────
+    # For visual_video: try ComfyUI + Flux.1-dev for AI backgrounds.
+    # Falls back silently to the Pillow pipeline if ComfyUI is unavailable.
+    comfyui_client = None
+    if video_type == "visual_video":
+        try:
+            from .comfyui_client import ComfyUIClient
+            _client = ComfyUIClient()
+            if _client.is_available():
+                comfyui_client = _client
+                log.info("ComfyUI available — visual_video will use Flux.1-dev AI backgrounds")
+            else:
+                log.warning(
+                    "ComfyUI not available at %s — visual_video falling back to Pillow slideshow",
+                    _client.base_url,
+                )
+        except Exception as _cfe:
+            log.warning("ComfyUI client init failed (%s) — using Pillow fallback", _cfe)
 
     scenes = script.get("scenes", [])
     if not scenes:
@@ -128,6 +145,26 @@ def produce_video(
         # ── Image ────────────────────────────────────────────────────────
         image_path = image_dir / f"scene_{scene_id}.png"
         if force_regen or not image_path.exists():
+            # For visual_video with ComfyUI available: generate AI background first
+            ai_bg = None
+            if comfyui_client is not None:
+                try:
+                    from .comfyui_client import build_scene_bg_prompt
+                    bg_prompt = build_scene_bg_prompt(
+                        scene=scene,
+                        video_title=script.get("title", ""),
+                        video_type=video_type,
+                    )
+                    ai_bg = comfyui_client.generate_image(bg_prompt)
+                    if ai_bg is None:
+                        log.warning(
+                            "ComfyUI returned None for scene %d — using Pillow fallback",
+                            scene_id,
+                        )
+                except Exception as _img_exc:
+                    log.warning("ComfyUI image failed for scene %d: %s", scene_id, _img_exc)
+                    ai_bg = None
+
             generate_scene_image(
                 scene=scene,
                 output_path=image_path,
@@ -135,6 +172,7 @@ def produce_video(
                 scene_index=idx,
                 total_scenes=len(scenes),
                 video_type=video_type,
+                ai_background=ai_bg,   # None → Pillow gradient; Image → AI composite
             )
         else:
             log.debug("Image skip (exists): %s", image_path.name)
