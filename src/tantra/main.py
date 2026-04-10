@@ -187,6 +187,12 @@ async def monitor_redirect() -> RedirectResponse:
     return RedirectResponse(url="/api/v1/monitor", status_code=302)
 
 
+@app.get("/agents", tags=["system"], include_in_schema=False)
+async def agents_redirect() -> RedirectResponse:
+    """Convenience redirect — /agents → /api/v1/agents (agent config dashboard)."""
+    return RedirectResponse(url="/api/v1/agents", status_code=302)
+
+
 @app.get("/", tags=["system"], include_in_schema=False)
 async def root() -> JSONResponse:
     return JSONResponse({

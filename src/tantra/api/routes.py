@@ -1440,11 +1440,19 @@ from pathlib import Path as _Path
 
 
 def _get_agents_root() -> _Path:
-    """Resolve agents/ directory — works in Docker (/app/agents) and host dev."""
-    for candidate in [_Path("/app/agents"), _Path(__file__).resolve().parents[4] / "agents"]:
-        if candidate.is_dir():
-            return candidate
-    raise FileNotFoundError("agents/ directory not found")
+    """Resolve agents/ directory — Docker (/app/agents) first, then host dev layout."""
+    # Docker: /app/agents (primary — bind-mounted via docker-compose)
+    docker = _Path("/app/agents")
+    if docker.is_dir():
+        return docker
+    # Host dev: __file__ = <repo>/src/tantra/api/routes.py → parents[3] = <repo root>
+    host = _Path(__file__).resolve().parents[3] / "agents"
+    if host.is_dir():
+        return host
+    raise FileNotFoundError(
+        f"agents/ directory not found. Tried: {docker}, {host}. "
+        "Add ./agents:/app/agents bind-mount to docker-compose.yml."
+    )
 
 
 @router.get("/agents", response_class=HTMLResponse, tags=["agents-dashboard"])
@@ -1453,7 +1461,7 @@ async def agents_dashboard() -> HTMLResponse:
     return HTMLResponse(_AGENTS_DASHBOARD_HTML)
 
 
-@router.get("/api/v1/agents/tree", tags=["agents-dashboard"])
+@router.get("/agents/tree", tags=["agents-dashboard"])
 async def agents_tree() -> JSONResponse:
     """Return the full agents/ directory tree as JSON."""
     try:
@@ -1482,7 +1490,7 @@ async def agents_tree() -> JSONResponse:
     return JSONResponse(_build_tree(root))
 
 
-@router.get("/api/v1/agents/file", tags=["agents-dashboard"])
+@router.get("/agents/file", tags=["agents-dashboard"])
 async def read_agent_file(path: str = Query(..., description="Relative path inside agents/")) -> JSONResponse:
     """Read a single agent config file."""
     try:
@@ -1512,7 +1520,7 @@ class AgentFileWriteRequest(BaseModel):
     comment: str = Field(default="update", description="Short description of what changed (stored in history)")
 
 
-@router.post("/api/v1/agents/file", tags=["agents-dashboard"])
+@router.post("/agents/file", tags=["agents-dashboard"])
 async def write_agent_file(request: AgentFileWriteRequest) -> JSONResponse:
     """
     Write a single agent config file with automatic version history.
@@ -1541,7 +1549,7 @@ async def write_agent_file(request: AgentFileWriteRequest) -> JSONResponse:
     return JSONResponse({"path": request.path, "saved": True, "size": len(request.content), "history_entry": entry})
 
 
-@router.get("/api/v1/agents/history", tags=["agents-dashboard"])
+@router.get("/agents/history", tags=["agents-dashboard"])
 async def get_file_history(path: str = Query(..., description="Relative path inside agents/")) -> JSONResponse:
     """Return the version history for a file (newest first). Each entry has ts, comment, actor, version_file, size."""
     from tantra.core.agent_loader import list_file_history
@@ -1566,7 +1574,7 @@ class AgentFileVersionRequest(BaseModel):
     version_file: str = Field(..., description="Version filename from CHANGELOG (e.g. '20260409_143000_initial.md')")
 
 
-@router.get("/api/v1/agents/version", tags=["agents-dashboard"])
+@router.get("/agents/version", tags=["agents-dashboard"])
 async def read_file_version(
     path: str = Query(...),
     version_file: str = Query(..., description="Version filename from CHANGELOG"),
@@ -1597,7 +1605,7 @@ class AgentRestoreRequest(BaseModel):
     comment: str = Field(default="", description="Optional comment for the restore action")
 
 
-@router.post("/api/v1/agents/restore", tags=["agents-dashboard"])
+@router.post("/agents/restore", tags=["agents-dashboard"])
 async def restore_file_version(request: AgentRestoreRequest) -> JSONResponse:
     """
     Restore a historical version as the new live content.
