@@ -499,7 +499,7 @@ services:
   # ---------------------------------------------------------------------------
   comfyui:
     <<: *restart
-    image: yanwk/comfyui-boot:cu124
+    image: yanwk/comfyui-boot:latest
     container_name: tantra-comfyui
     volumes:
       - ./data/comfyui/models:/root/ComfyUI/models          # model weights
