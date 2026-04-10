@@ -78,6 +78,8 @@ model_list:
       stream: true
       max_tokens: 8192
       temperature: 0.7
+      extra_body:
+        think: false          # disable thinking for consistent response times
     model_info:
       description: "Local frontier fallback — Qwen3-30B MoE (8GB VRAM)"
 
@@ -101,6 +103,9 @@ model_list:
       stream: true
       max_tokens: 8192
       temperature: 0.6
+      extra_body:
+        think: false          # disable qwen3 chain-of-thought — without this qwen3:30b
+                              # takes 2-3 min per generation due to internal reasoning tokens
     model_info:
       description: "Director local — Qwen3-30B MoE (8GB VRAM, 128K ctx)"
 
@@ -115,6 +120,8 @@ model_list:
       stream: true
       max_tokens: 8192
       temperature: 0.5
+      extra_body:
+        think: false          # disable qwen3 chain-of-thought for responsive manager agents
     model_info:
       description: "Manager — Qwen3-14B (10GB VRAM, 128K ctx)"
 
@@ -149,6 +156,9 @@ model_list:
       stream: true
       max_tokens: 4096
       temperature: 0.2
+      extra_body:
+        think: false          # disable thinking for coder — structured output tasks don't
+                              # benefit from chain-of-thought and it causes timeout issues
     model_info:
       description: "Coder primary — Qwen3-30B (best available, pending deepseek pull)"
 
