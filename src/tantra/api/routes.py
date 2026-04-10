@@ -1429,3 +1429,666 @@ async def monitor_websocket(websocket: WebSocket) -> None:
         await r.aclose()
     except Exception:
         pass
+
+
+# ---------------------------------------------------------------------------
+# Agent Config Dashboard — /agents
+# ---------------------------------------------------------------------------
+
+import os as _os
+from pathlib import Path as _Path
+
+
+def _get_agents_root() -> _Path:
+    """Resolve agents/ directory — works in Docker (/app/agents) and host dev."""
+    for candidate in [_Path("/app/agents"), _Path(__file__).resolve().parents[4] / "agents"]:
+        if candidate.is_dir():
+            return candidate
+    raise FileNotFoundError("agents/ directory not found")
+
+
+@router.get("/agents", response_class=HTMLResponse, tags=["agents-dashboard"])
+async def agents_dashboard() -> HTMLResponse:
+    """Browser UI for browsing and editing all agent config files."""
+    return HTMLResponse(_AGENTS_DASHBOARD_HTML)
+
+
+@router.get("/api/v1/agents/tree", tags=["agents-dashboard"])
+async def agents_tree() -> JSONResponse:
+    """Return the full agents/ directory tree as JSON."""
+    try:
+        root = _get_agents_root()
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    def _build_tree(path: _Path) -> dict:
+        if path.is_file():
+            return {"name": path.name, "type": "file", "path": str(path.relative_to(root))}
+        children = []
+        try:
+            for child in sorted(path.iterdir()):
+                if child.name.startswith("."):
+                    continue
+                children.append(_build_tree(child))
+        except PermissionError:
+            pass
+        return {
+            "name": path.name,
+            "type": "directory",
+            "path": str(path.relative_to(root)) if path != root else "",
+            "children": children,
+        }
+
+    return JSONResponse(_build_tree(root))
+
+
+@router.get("/api/v1/agents/file", tags=["agents-dashboard"])
+async def read_agent_file(path: str = Query(..., description="Relative path inside agents/")) -> JSONResponse:
+    """Read a single agent config file."""
+    try:
+        root = _get_agents_root()
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    # Security: prevent path traversal
+    try:
+        full_path = (root / path).resolve()
+        full_path.relative_to(root.resolve())  # raises ValueError if outside root
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Path traversal not allowed")
+
+    if not full_path.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {path}")
+    if not full_path.is_file():
+        raise HTTPException(status_code=400, detail="Path is a directory, not a file")
+
+    content = full_path.read_text(encoding="utf-8")
+    return JSONResponse({"path": path, "content": content, "size": len(content)})
+
+
+class AgentFileWriteRequest(BaseModel):
+    path: str = Field(..., description="Relative path inside agents/")
+    content: str = Field(..., description="New file content")
+    comment: str = Field(default="update", description="Short description of what changed (stored in history)")
+
+
+@router.post("/api/v1/agents/file", tags=["agents-dashboard"])
+async def write_agent_file(request: AgentFileWriteRequest) -> JSONResponse:
+    """
+    Write a single agent config file with automatic version history.
+    Hot-reload: the change takes effect on the NEXT LLM call — zero restart needed.
+    Every save creates a versioned snapshot in .history/ with your comment.
+    """
+    from tantra.core.agent_loader import save_file_with_history
+
+    try:
+        root = _get_agents_root()
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    # Security: prevent path traversal
+    try:
+        full_path = (root / request.path).resolve()
+        full_path.relative_to(root.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Path traversal not allowed")
+
+    # Only allow editing .md and .json files
+    if full_path.suffix not in (".md", ".json"):
+        raise HTTPException(status_code=400, detail="Only .md and .json files can be edited")
+
+    entry = save_file_with_history(full_path, request.content, comment=request.comment, actor="user")
+    return JSONResponse({"path": request.path, "saved": True, "size": len(request.content), "history_entry": entry})
+
+
+@router.get("/api/v1/agents/history", tags=["agents-dashboard"])
+async def get_file_history(path: str = Query(..., description="Relative path inside agents/")) -> JSONResponse:
+    """Return the version history for a file (newest first). Each entry has ts, comment, actor, version_file, size."""
+    from tantra.core.agent_loader import list_file_history
+
+    try:
+        root = _get_agents_root()
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    try:
+        full_path = (root / path).resolve()
+        full_path.relative_to(root.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Path traversal not allowed")
+
+    history = list_file_history(full_path)
+    return JSONResponse({"path": path, "versions": history})
+
+
+class AgentFileVersionRequest(BaseModel):
+    path: str = Field(..., description="Relative path inside agents/")
+    version_file: str = Field(..., description="Version filename from CHANGELOG (e.g. '20260409_143000_initial.md')")
+
+
+@router.get("/api/v1/agents/version", tags=["agents-dashboard"])
+async def read_file_version(
+    path: str = Query(...),
+    version_file: str = Query(..., description="Version filename from CHANGELOG"),
+) -> JSONResponse:
+    """Read the content of a specific historical version of a file."""
+    from tantra.core.agent_loader import read_file_version as _read_version
+
+    try:
+        root = _get_agents_root()
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    try:
+        full_path = (root / path).resolve()
+        full_path.relative_to(root.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Path traversal not allowed")
+
+    content = _read_version(full_path, version_file)
+    if content is None:
+        raise HTTPException(status_code=404, detail=f"Version not found: {version_file}")
+    return JSONResponse({"path": path, "version_file": version_file, "content": content})
+
+
+class AgentRestoreRequest(BaseModel):
+    path: str = Field(..., description="Relative path inside agents/")
+    version_file: str = Field(..., description="Version filename to restore")
+    comment: str = Field(default="", description="Optional comment for the restore action")
+
+
+@router.post("/api/v1/agents/restore", tags=["agents-dashboard"])
+async def restore_file_version(request: AgentRestoreRequest) -> JSONResponse:
+    """
+    Restore a historical version as the new live content.
+    Creates a new history entry recording the restore. Hot-reload applies immediately.
+    """
+    from tantra.core.agent_loader import restore_file_version as _restore
+
+    try:
+        root = _get_agents_root()
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+    try:
+        full_path = (root / request.path).resolve()
+        full_path.relative_to(root.resolve())
+    except ValueError:
+        raise HTTPException(status_code=403, detail="Path traversal not allowed")
+
+    comment = request.comment or f"restored from {request.version_file}"
+    entry = _restore(full_path, request.version_file, comment=comment)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Version not found: {request.version_file}")
+    return JSONResponse({"path": request.path, "restored": True, "history_entry": entry})
+
+
+# ---------------------------------------------------------------------------
+# Dashboard HTML (single-file SPA — no external dependencies)
+# ---------------------------------------------------------------------------
+
+_AGENTS_DASHBOARD_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tantra AI — Agent Config Dashboard</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+       background: #0f0f13; color: #e0e0e0; display: flex; height: 100vh; overflow: hidden; }
+
+/* ── Sidebar ── */
+#sidebar { width: 260px; min-width: 180px; background: #16161e; border-right: 1px solid #2a2a3a;
+           overflow-y: auto; flex-shrink: 0; display: flex; flex-direction: column; }
+#sidebar-header { padding: 14px 16px; border-bottom: 1px solid #2a2a3a; }
+#sidebar-header h1 { font-size: 13px; font-weight: 600; color: #a78bfa; }
+#sidebar-header p { font-size: 10px; color: #555; margin-top: 3px; }
+#tree { flex: 1; overflow-y: auto; padding: 6px 0; }
+.tree-item { cursor: pointer; user-select: none; }
+.tree-dir { padding: 4px 8px 4px 6px; display: flex; align-items: center; gap: 5px;
+            font-size: 11px; color: #94a3b8; font-weight: 500; }
+.tree-dir:hover { color: #e0e0e0; }
+.tree-dir .icon { font-size: 10px; width: 10px; }
+.tree-children { margin-left: 14px; border-left: 1px solid #222230; }
+.tree-file { padding: 3px 8px; display: flex; align-items: center; gap: 7px;
+             font-size: 11px; color: #55607a; cursor: pointer; border-radius: 3px; margin: 1px 4px; }
+.tree-file:hover { background: #1e1e2e; color: #a0aec0; }
+.tree-file.active { background: #2d1f56; color: #a78bfa; }
+.tree-file .dot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+.dot-static { background: #4ade80; }
+.dot-dynamic { background: #f59e0b; }
+.dot-config { background: #60a5fa; }
+
+/* ── Main area ── */
+#main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+#topbar { background: #16161e; border-bottom: 1px solid #2a2a3a; padding: 8px 14px;
+          display: flex; align-items: center; gap: 10px; min-height: 44px; flex-wrap: wrap; }
+#file-path { font-size: 11px; color: #6366f1; font-family: monospace; flex: 1; min-width: 0;
+             white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+button.tb-btn { padding: 5px 12px; border-radius: 5px; font-size: 11px; font-weight: 500;
+                cursor: pointer; border: none; white-space: nowrap; }
+#edit-btn  { background: #2d2d44; color: #a78bfa; }
+#edit-btn:hover { background: #3a3a58; }
+#hist-btn  { background: #1e2a1e; color: #4ade80; }
+#hist-btn:hover { background: #243224; }
+#save-btn  { background: #7c3aed; color: white; display: none; }
+#save-btn:hover { background: #6d28d9; }
+#cancel-btn { background: #2d2d44; color: #94a3b8; display: none; }
+#cancel-btn:hover { background: #3a3a58; }
+.badge { font-size: 10px; padding: 2px 6px; border-radius: 8px; font-weight: 600; }
+.badge-static  { background: #14532d; color: #4ade80; }
+.badge-dynamic { background: #451a03; color: #f59e0b; }
+.badge-config  { background: #1e3a5f; color: #60a5fa; }
+
+/* ── Content split: viewer/editor + history panel ── */
+#content-area { flex: 1; display: flex; overflow: hidden; }
+#center-pane  { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+
+/* ── Viewer ── */
+#viewer { flex: 1; overflow-y: auto; padding: 20px 24px; font-size: 13px; line-height: 1.75; }
+#viewer pre { background: #1a1a24; border: 1px solid #2a2a3a; border-radius: 5px; padding: 14px;
+              overflow-x: auto; font-size: 11.5px; }
+#viewer code { font-family: 'JetBrains Mono', 'Fira Code', monospace; }
+#viewer h1 { color: #a78bfa; font-size: 17px; margin-bottom: 10px; padding-bottom: 7px;
+             border-bottom: 1px solid #2a2a3a; }
+#viewer h2 { color: #818cf8; font-size: 14px; margin: 18px 0 7px; }
+#viewer h3 { color: #94a3b8; font-size: 12px; margin: 14px 0 5px; }
+#viewer p  { color: #c0c0d0; margin-bottom: 9px; }
+#viewer li { color: #c0c0d0; margin-left: 18px; margin-bottom: 4px; }
+#viewer table { width: 100%; border-collapse: collapse; margin: 10px 0; font-size: 11px; }
+#viewer th { background: #1e1e2e; color: #94a3b8; padding: 5px 10px; text-align: left;
+             border: 1px solid #2a2a3a; }
+#viewer td { padding: 4px 10px; border: 1px solid #2a2a3a; color: #c0c0d0; }
+#viewer a  { color: #60a5fa; }
+
+/* ── Editor ── */
+#editor { flex: 1; display: none; flex-direction: column; }
+#edit-comment-bar { background: #12121a; border-bottom: 1px solid #2a2a3a;
+                    padding: 6px 14px; display: flex; align-items: center; gap: 8px; }
+#edit-comment-bar label { font-size: 11px; color: #64748b; white-space: nowrap; }
+#edit-comment { flex: 1; background: #1e1e2e; border: 1px solid #2a2a3a; border-radius: 4px;
+                color: #e0e0e0; font-size: 11px; padding: 4px 8px; outline: none; }
+#edit-comment:focus { border-color: #4c1d95; }
+#editor textarea { flex: 1; background: #0f0f13; color: #e0e0e0; border: none; outline: none;
+                   padding: 20px 24px; font-family: 'JetBrains Mono', 'Fira Code', monospace;
+                   font-size: 12.5px; line-height: 1.65; resize: none; tab-size: 2; }
+
+/* ── History panel ── */
+#history-panel { width: 320px; background: #12121a; border-left: 1px solid #2a2a3a;
+                 display: none; flex-direction: column; flex-shrink: 0; overflow: hidden; }
+#history-panel.open { display: flex; }
+#history-header { padding: 10px 14px; border-bottom: 1px solid #2a2a3a; display: flex;
+                  align-items: center; gap: 8px; }
+#history-header h3 { font-size: 12px; color: #a78bfa; flex: 1; }
+#history-close { background: none; border: none; color: #555; cursor: pointer; font-size: 16px; }
+#history-close:hover { color: #e0e0e0; }
+#history-list { flex: 1; overflow-y: auto; }
+.hist-entry { padding: 10px 14px; border-bottom: 1px solid #1e1e2e; cursor: pointer; }
+.hist-entry:hover { background: #1a1a2e; }
+.hist-entry.hist-selected { background: #2d1f56; }
+.hist-ts { font-size: 10px; color: #555; font-family: monospace; }
+.hist-comment { font-size: 11px; color: #a0aec0; margin-top: 2px; font-weight: 500; }
+.hist-meta { font-size: 10px; color: #445; margin-top: 2px; }
+#history-preview { height: 220px; border-top: 1px solid #2a2a3a; display: flex;
+                   flex-direction: column; overflow: hidden; }
+#history-preview-header { padding: 6px 14px; background: #0f0f13; display: flex;
+                           align-items: center; gap: 8px; border-bottom: 1px solid #1e1e2e; }
+#history-preview-header span { font-size: 10px; color: #555; flex: 1; font-family: monospace; }
+#restore-btn { padding: 4px 10px; background: #7c3aed; color: white; border: none;
+               border-radius: 4px; font-size: 10px; cursor: pointer; }
+#restore-btn:hover { background: #6d28d9; }
+#restore-btn:disabled { background: #2d2d44; color: #555; cursor: default; }
+#history-preview-content { flex: 1; overflow-y: auto; padding: 10px 14px;
+                            font-family: monospace; font-size: 10.5px; color: #6a7090;
+                            white-space: pre-wrap; line-height: 1.5; }
+
+/* ── Welcome + status ── */
+#welcome { flex: 1; display: flex; align-items: center; justify-content: center;
+           flex-direction: column; gap: 8px; }
+#welcome h2 { font-size: 18px; color: #3a3a5a; }
+#welcome p  { font-size: 12px; color: #2a2a40; }
+#statusbar { padding: 3px 14px; background: #0a0a10; font-size: 10px; color: #3a3a5a;
+             border-top: 1px solid #1a1a24; }
+</style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<div id="sidebar">
+  <div id="sidebar-header">
+    <h1>🧠 Agent Configs</h1>
+    <p>Hot-reload · Version history · Restore</p>
+  </div>
+  <div id="tree">Loading...</div>
+</div>
+
+<!-- Main -->
+<div id="main">
+  <div id="topbar">
+    <span id="file-path">Select a file to view</span>
+    <span id="file-badge" class="badge" style="display:none"></span>
+    <button class="tb-btn" id="hist-btn" onclick="toggleHistory()" style="display:none">🕐 History</button>
+    <button class="tb-btn" id="edit-btn" onclick="startEdit()" style="display:none">✏️ Edit</button>
+    <button class="tb-btn" id="save-btn" onclick="saveFile()">💾 Save</button>
+    <button class="tb-btn" id="cancel-btn" onclick="cancelEdit()">✕ Cancel</button>
+  </div>
+
+  <div id="content-area">
+    <div id="center-pane">
+      <div id="welcome">
+        <h2>Tantra AI — Agent Config Dashboard</h2>
+        <p>Select a file from the sidebar to view, edit, or browse its history.</p>
+        <p style="margin-top:6px;color:#222235;font-size:11px">Hot-reload · All changes apply instantly · Full version history with restore</p>
+      </div>
+      <div id="viewer" style="display:none"></div>
+      <div id="editor" style="display:none">
+        <div id="edit-comment-bar">
+          <label for="edit-comment">Change description:</label>
+          <input id="edit-comment" type="text" placeholder="e.g. improved hook tone, added space mission policy" maxlength="120">
+        </div>
+        <textarea id="editor-textarea" spellcheck="false"></textarea>
+      </div>
+    </div>
+
+    <!-- History panel -->
+    <div id="history-panel">
+      <div id="history-header">
+        <h3>🕐 Version History</h3>
+        <button id="history-close" onclick="closeHistory()">✕</button>
+      </div>
+      <div id="history-list"></div>
+      <div id="history-preview">
+        <div id="history-preview-header">
+          <span id="preview-version-label">Select a version to preview</span>
+          <button id="restore-btn" onclick="restoreVersion()" disabled>↩ Restore</button>
+        </div>
+        <div id="history-preview-content"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="statusbar">Ready</div>
+</div>
+
+<script>
+const FILE_TYPES = {
+  'soul.md':       { label: 'Soul',       cls: 'static',  dot: 'static' },
+  'skills.md':     { label: 'Skills',     cls: 'static',  dot: 'static' },
+  'policy.md':     { label: 'Policy',     cls: 'static',  dot: 'static' },
+  'memory.md':     { label: 'Memory',     cls: 'static',  dot: 'static' },
+  'tools.json':    { label: 'Tools',      cls: 'config',  dot: 'config' },
+  'reflection.md': { label: 'Reflection', cls: 'dynamic', dot: 'dynamic' },
+  'learning.md':   { label: 'Learning',   cls: 'dynamic', dot: 'dynamic' },
+  'feedback.md':   { label: 'Feedback',   cls: 'dynamic', dot: 'dynamic' },
+  'evaluation.md': { label: 'Evaluation', cls: 'dynamic', dot: 'dynamic' },
+};
+const EDITABLE = ['.md', '.json'];
+const ORDER = ['soul.md','skills.md','policy.md','memory.md','tools.json',
+               'reflection.md','learning.md','feedback.md','evaluation.md'];
+
+let currentPath = null;
+let currentContent = null;
+let editing = false;
+let selectedVersion = null;
+
+// ── Markdown renderer ─────────────────────────────────────────────────────
+function renderMd(md) {
+  let h = md
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/```[a-z]*\\n([\\s\\S]*?)```/g,(_,c)=>`<pre><code>${c}</code></pre>`)
+    .replace(/`([^`]+)`/g,'<code>$1</code>')
+    .replace(/^### (.+)$/gm,'<h3>$1</h3>').replace(/^## (.+)$/gm,'<h2>$1</h2>').replace(/^# (.+)$/gm,'<h1>$1</h1>')
+    .replace(/\\*\\*([^*]+)\\*\\*/g,'<strong>$1</strong>').replace(/\\*([^*]+)\\*/g,'<em>$1</em>')
+    .replace(/^- \\[x\\] (.+)$/gm,'<li>☑ $1</li>').replace(/^- \\[ \\] (.+)$/gm,'<li>☐ $1</li>')
+    .replace(/^- (.+)$/gm,'<li>$1</li>').replace(/^\\d+\\. (.+)$/gm,'<li>$1</li>')
+    .replace(/(<li>[\\s\\S]*?<\\/li>\\n?)+/g,m=>`<ul>${m}</ul>`)
+    .replace(/^\\| (.+) \\|$/gm,(_,row)=>'<tr>'+row.split(' | ').map(c=>`<td>${c.trim()}</td>`).join('')+'</tr>')
+    .replace(/(<tr>[\\s\\S]*?<\\/tr>\\n?)+/g,m=>`<table><tr><th>${m.replace(/<td>/g,'<th>').replace(/<\\/td>/g,'<\\/th>').replace(/<tr>/,'').replace(/<\\/tr>\\n?/,'')}</th></tr>${m}</table>`)
+    .replace(/^---$/gm,'<hr style="border-color:#2a2a3a;margin:14px 0">')
+    .replace(/^(?!<[h|t|u|l|p|h])(.+)$/gm,'<p>$1</p>');
+  return h;
+}
+
+// ── Tree ──────────────────────────────────────────────────────────────────
+function renderTree(node, container) {
+  if (node.type === 'file') {
+    if (node.name === 'CHANGELOG.json') return;
+    const info = FILE_TYPES[node.name] || { cls: 'static', dot: 'static' };
+    const el = document.createElement('div');
+    el.className = 'tree-file tree-item';
+    el.dataset.path = node.path;
+    el.innerHTML = `<span class="dot dot-${info.dot}"></span><span>${node.name}</span>`;
+    el.addEventListener('click', () => openFile(node.path, el));
+    container.appendChild(el);
+  } else {
+    if (node.name === '_framework' || node.name === '.history') return;
+    const wrap = document.createElement('div');
+    const lbl = document.createElement('div');
+    lbl.className = 'tree-dir tree-item';
+    const ico = document.createElement('span'); ico.className = 'icon'; ico.textContent = '▾';
+    const nm = document.createElement('span'); nm.className = 'name'; nm.textContent = node.name || 'agents';
+    lbl.appendChild(ico); lbl.appendChild(nm);
+    const kids = document.createElement('div'); kids.className = 'tree-children';
+    const dirs  = (node.children||[]).filter(c=>c.type==='directory' && c.name!=='.history');
+    const files = (node.children||[]).filter(c=>c.type==='file' && c.name!=='CHANGELOG.json');
+    files.sort((a,b)=>{
+      const ai=ORDER.indexOf(a.name), bi=ORDER.indexOf(b.name);
+      if(ai===-1&&bi===-1)return a.name.localeCompare(b.name);
+      return ai===-1?1:bi===-1?-1:ai-bi;
+    });
+    [...dirs,...files].forEach(child=>renderTree(child,kids));
+    lbl.addEventListener('click',()=>{
+      const open=kids.style.display!=='none';
+      kids.style.display=open?'none':'block';
+      ico.textContent=open?'▸':'▾';
+    });
+    wrap.appendChild(lbl); wrap.appendChild(kids);
+    container.appendChild(wrap);
+  }
+}
+
+// ── File open ─────────────────────────────────────────────────────────────
+async function openFile(path, el) {
+  if (editing && !confirm('Discard unsaved changes?')) return;
+  cancelEdit();
+  document.querySelectorAll('.tree-file').forEach(e=>e.classList.remove('active'));
+  el.classList.add('active');
+  currentPath = path;
+  const name = path.split('/').pop();
+  document.getElementById('file-path').textContent = 'agents/' + path;
+  const badge = document.getElementById('file-badge');
+  const info = FILE_TYPES[name] || { label: name.replace(/\\..+/,''), cls: 'static' };
+  badge.textContent = info.label || name;
+  badge.className = 'badge badge-' + info.cls;
+  badge.style.display = 'inline-block';
+  const editable = EDITABLE.some(s=>name.endsWith(s));
+  document.getElementById('edit-btn').style.display = editable ? 'block' : 'none';
+  document.getElementById('hist-btn').style.display = editable ? 'block' : 'none';
+  setStatus('Loading...');
+  try {
+    const res = await fetch('/api/v1/agents/file?path='+encodeURIComponent(path));
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    currentContent = data.content;
+    showViewer(name, data.content);
+    setStatus('agents/' + path + ' · ' + data.size + ' bytes');
+  } catch(e) { setStatus('Error: '+e.message); }
+}
+
+function showViewer(name, content) {
+  document.getElementById('welcome').style.display = 'none';
+  document.getElementById('viewer').style.display = 'block';
+  document.getElementById('editor').style.display = 'none';
+  document.getElementById('save-btn').style.display = 'none';
+  document.getElementById('cancel-btn').style.display = 'none';
+  editing = false;
+  if (name.endsWith('.json')) {
+    try {
+      document.getElementById('viewer').innerHTML = '<pre><code>' +
+        JSON.stringify(JSON.parse(content),null,2).replace(/</g,'&lt;') + '</code></pre>';
+    } catch { document.getElementById('viewer').textContent = content; }
+  } else {
+    document.getElementById('viewer').innerHTML = renderMd(content);
+  }
+}
+
+function startEdit() {
+  document.getElementById('viewer').style.display = 'none';
+  document.getElementById('editor').style.display = 'flex';
+  document.getElementById('edit-btn').style.display = 'none';
+  document.getElementById('hist-btn').style.display = 'none';
+  document.getElementById('save-btn').style.display = 'block';
+  document.getElementById('cancel-btn').style.display = 'block';
+  document.getElementById('editor-textarea').value = currentContent;
+  document.getElementById('edit-comment').value = '';
+  document.getElementById('editor-textarea').focus();
+  editing = true;
+  setStatus('Editing agents/' + currentPath + ' — add a description then Save');
+}
+
+function cancelEdit() {
+  if (!currentPath) return;
+  const name = currentPath.split('/').pop();
+  const editable = EDITABLE.some(s=>name.endsWith(s));
+  showViewer(name, currentContent);
+  document.getElementById('edit-btn').style.display = editable ? 'block' : 'none';
+  document.getElementById('hist-btn').style.display = editable ? 'block' : 'none';
+  editing = false;
+}
+
+async function saveFile() {
+  const content = document.getElementById('editor-textarea').value;
+  const comment = document.getElementById('edit-comment').value.trim() || 'update';
+  setStatus('Saving...');
+  try {
+    const res = await fetch('/api/v1/agents/file', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ path: currentPath, content, comment }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    currentContent = content;
+    const name = currentPath.split('/').pop();
+    showViewer(name, content);
+    document.getElementById('edit-btn').style.display = 'block';
+    document.getElementById('hist-btn').style.display = 'block';
+    const entry = data.history_entry || {};
+    setStatus('✓ Saved · "' + (entry.comment||comment) + '" · v:' + (entry.version_file||'') + ' · hot-reloaded');
+    // Refresh history panel if open
+    if (document.getElementById('history-panel').classList.contains('open')) loadHistory();
+  } catch(e) { setStatus('❌ Save failed: ' + e.message); }
+}
+
+// ── History panel ─────────────────────────────────────────────────────────
+async function toggleHistory() {
+  const panel = document.getElementById('history-panel');
+  if (panel.classList.contains('open')) { closeHistory(); return; }
+  panel.classList.add('open');
+  await loadHistory();
+}
+
+function closeHistory() {
+  document.getElementById('history-panel').classList.remove('open');
+  selectedVersion = null;
+}
+
+async function loadHistory() {
+  if (!currentPath) return;
+  const list = document.getElementById('history-list');
+  list.innerHTML = '<div style="padding:14px;font-size:11px;color:#444">Loading...</div>';
+  selectedVersion = null;
+  document.getElementById('restore-btn').disabled = true;
+  document.getElementById('history-preview-content').textContent = '';
+  document.getElementById('preview-version-label').textContent = 'Select a version to preview';
+  try {
+    const res = await fetch('/api/v1/agents/history?path='+encodeURIComponent(currentPath));
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    const versions = data.versions || [];
+    if (!versions.length) {
+      list.innerHTML = '<div style="padding:14px;font-size:11px;color:#444">No history yet.<br>Save a change to create the first version.</div>';
+      return;
+    }
+    list.innerHTML = '';
+    versions.forEach((v, i) => {
+      const el = document.createElement('div');
+      el.className = 'hist-entry';
+      const date = v.ts ? new Date(v.ts).toLocaleString() : v.ts;
+      const actor = v.actor === 'agent' ? '🤖' : v.actor === 'system' ? '⚙️' : '👤';
+      el.innerHTML = `
+        <div class="hist-ts">${date} ${actor}</div>
+        <div class="hist-comment">${escHtml(v.comment||'update')}</div>
+        <div class="hist-meta">${(v.size||0).toLocaleString()} bytes · ${escHtml(v.version_file||'')}</div>`;
+      el.addEventListener('click', () => previewVersion(v, el));
+      if (i === 0) el.innerHTML += '<div style="font-size:9px;color:#4ade80;margin-top:2px">◆ current</div>';
+      list.appendChild(el);
+    });
+  } catch(e) {
+    list.innerHTML = `<div style="padding:14px;font-size:11px;color:#f87171">Error: ${e.message}</div>`;
+  }
+}
+
+async function previewVersion(v, el) {
+  document.querySelectorAll('.hist-entry').forEach(e=>e.classList.remove('hist-selected'));
+  el.classList.add('hist-selected');
+  selectedVersion = v;
+  document.getElementById('preview-version-label').textContent = v.version_file || '';
+  document.getElementById('restore-btn').disabled = false;
+  document.getElementById('history-preview-content').textContent = 'Loading...';
+  try {
+    const res = await fetch('/api/v1/agents/version?path='+encodeURIComponent(currentPath)
+                           +'&version_file='+encodeURIComponent(v.version_file));
+    if (!res.ok) throw new Error(await res.text());
+    const data = await res.json();
+    document.getElementById('history-preview-content').textContent = data.content;
+  } catch(e) {
+    document.getElementById('history-preview-content').textContent = 'Error: ' + e.message;
+  }
+}
+
+async function restoreVersion() {
+  if (!selectedVersion) return;
+  const comment = prompt('Restore comment (optional):', 'restored from ' + (selectedVersion.ts||'').slice(0,10));
+  if (comment === null) return; // cancelled
+  setStatus('Restoring...');
+  try {
+    const res = await fetch('/api/v1/agents/restore', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ path: currentPath, version_file: selectedVersion.version_file, comment: comment||'' }),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    // Reload live file
+    const fileRes = await fetch('/api/v1/agents/file?path='+encodeURIComponent(currentPath));
+    const fileData = await fileRes.json();
+    currentContent = fileData.content;
+    showViewer(currentPath.split('/').pop(), currentContent);
+    await loadHistory();
+    setStatus('✓ Restored — "' + (comment||'restored') + '" · hot-reloaded on next LLM call');
+  } catch(e) { setStatus('❌ Restore failed: ' + e.message); }
+}
+
+function escHtml(s) { return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function setStatus(msg) { document.getElementById('statusbar').textContent = msg; }
+
+// ── Init ──────────────────────────────────────────────────────────────────
+async function init() {
+  try {
+    const res = await fetch('/api/v1/agents/tree');
+    if (!res.ok) throw new Error('tree load failed');
+    const tree = await res.json();
+    const c = document.getElementById('tree');
+    c.innerHTML = '';
+    renderTree(tree, c);
+  } catch(e) {
+    document.getElementById('tree').textContent = 'Error: ' + e.message;
+  }
+}
+
+window.addEventListener('beforeunload', e => { if(editing){e.preventDefault();e.returnValue='';} });
+init();
+</script>
+</body>
+</html>"""

@@ -1,0 +1,34 @@
+# Agent Config — Git Tracking Rules
+#
+# STRATEGY: Two-layer versioning
+#
+#   Layer 1 — Git (this file)
+#     Tracks static config files: soul.md, skills.md, policy.md, memory.md, tools.json
+#     + framework templates and core cross-agent docs
+#     Use git for: production snapshots, code reviews, rollbacks across the whole stack
+#
+#   Layer 2 — File history system (agent_loader.py + /api/v1/agents/history)
+#     Tracks EVERY save with a comment, inside .history/<filename>/
+#     Covers both manual edits (browser dashboard) and agent auto-writes
+#     Use file history for: granular per-save versioning, quick restore, audit trail
+#
+# Result: git commits stay clean (no noise from agent auto-writes).
+# Full per-save history lives in .history/ and is accessible at localhost:8000/agents
+
+# ── Ignore: file history (fine-grained, per-save — NOT git's job) ──────────
+**/.history/
+
+# ── Ignore: dynamic agent auto-write files ─────────────────────────────────
+# These are auto-written by the agent after tasks and accumulate frequently.
+# Full history is maintained by the .history/ system above.
+# If you want to snapshot a particularly important reflection/learning,
+# copy it into memory.md (which IS tracked) before committing.
+**/reflection.md
+**/learning.md
+**/feedback.md
+**/evaluation.md
+
+# ── Track: static config files (soul, skills, policy, memory, tools) ───────
+# These are explicitly NOT ignored — git tracks them normally.
+# soul.md, skills.md, policy.md, memory.md, tools.json — all tracked.
+# Changes to these should be committed with a meaningful message.

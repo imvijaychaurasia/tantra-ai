@@ -20,6 +20,7 @@ from typing import Any, Optional
 from crewai import LLM, Agent, Crew, Process, Task
 from crewai.tools import tool
 
+from tantra.core.agent_loader import AgentConfigLoader
 from tantra.core.config import ModelTier, settings
 from tantra.tools.youtube import youtube_search
 
@@ -177,6 +178,13 @@ def build_youtube_crew(
     }
     video_type_note = _VIDEO_TYPE_GUIDANCE.get(video_type, _VIDEO_TYPE_GUIDANCE["slideshow"])
 
+    # Hot-reload: backstories read fresh from agents/ config files on every crew build.
+    # Edit soul.md/skills.md on host → next youtube_script task picks up the change.
+    _researcher_cfg = AgentConfigLoader("youtube-crew/researcher")
+    _writer_cfg = AgentConfigLoader("youtube-crew/script-writer")
+    _seo_cfg = AgentConfigLoader("youtube-crew/seo-optimizer")
+    _reviewer_cfg = AgentConfigLoader("youtube-crew/quality-reviewer")
+
     # ── Topic Researcher ──────────────────────────────────────────────────────
     researcher = Agent(
         role="YouTube Content Research Analyst",
@@ -184,12 +192,7 @@ def build_youtube_crew(
             "Identify trending angles, competitor gaps, and audience pain points "
             "for YouTube videos on the assigned topic. Produce a structured research brief."
         ),
-        backstory=(
-            "You are an expert YouTube content strategist who understands what makes "
-            "technical content go viral in the builder/AI community. You analyse trends, "
-            "spot underserved angles, and always ground your recommendations in real data "
-            "from what's already out there."
-        ),
+        backstory=_researcher_cfg.build_crewai_backstory(),
         llm=_make_llm(ModelTier.worker),
         tools=[research_youtube_trends, analyse_competitor_gap],
         max_iter=6,
@@ -204,13 +207,7 @@ def build_youtube_crew(
             "Write a compelling, scene-by-scene YouTube video script with strong hooks, "
             "clear narration text per scene, and specific visual prompts for AI generation."
         ),
-        backstory=(
-            "You are a seasoned YouTube scriptwriter who understands retention, pacing, "
-            "and the builder/technical audience. You write scripts that are authentic and "
-            "story-driven — not corporate or polished. You know the first 30 seconds are "
-            "everything. Your scripts include specific narration text (for TTS) and "
-            "visual prompts (for AI image/video generation) for every scene."
-        ),
+        backstory=_writer_cfg.build_crewai_backstory(),
         llm=_make_llm(ModelTier.director),
         max_iter=5,
         verbose=verbose,
@@ -224,13 +221,7 @@ def build_youtube_crew(
             "Write a keyword-optimised title (≤100 chars), SEO description (250+ words), "
             "15-20 tags, and a concrete FLUX.1 image generation prompt for the thumbnail."
         ),
-        backstory=(
-            "You are a YouTube SEO expert who understands search intent, click-through rate "
-            "optimisation, and how to write titles that balance curiosity and clarity. "
-            "You know that for technical builder content, specific > clickbait. "
-            "Your thumbnail prompts are precise enough for an AI image model to generate "
-            "a compelling visual without any human interpretation."
-        ),
+        backstory=_seo_cfg.build_crewai_backstory(),
         llm=_make_llm(ModelTier.worker),
         max_iter=4,
         verbose=verbose,
@@ -245,18 +236,7 @@ def build_youtube_crew(
             "brand voice consistency, and technical accuracy. Output the final approved "
             "script as a valid JSON object matching the YouTubeScript schema."
         ),
-        backstory=(
-            "You are a meticulous quality reviewer who ensures every video is high quality — "
-            "authentic, educational, technically accurate, and zero hype. "
-            "You check that the hook grabs in the first 5 seconds, that each scene has "
-            "a clear narration and visual prompt, that the CTA is specific and genuine, "
-            "and that the thumbnail prompt will produce a compelling image. "
-            "You NEVER change the video topic — the topic is fixed by the Director. "
-            "Your final output is ALWAYS a valid JSON object — no markdown, no preamble. "
-            "You MUST include ALL fields: title, duration_target_seconds, hook, scenes, "
-            "call_to_action, thumbnail_concept, thumbnail_prompt, description, and tags. "
-            "Copy description, tags, and thumbnail_prompt verbatim from the SEO Specialist's output."
-        ),
+        backstory=_reviewer_cfg.build_crewai_backstory(),
         llm=_make_llm(ModelTier.worker),  # worker tier (14B) — fast (4B) truncates full JSON output
         max_iter=4,
         verbose=verbose,

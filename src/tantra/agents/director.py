@@ -474,11 +474,19 @@ class DirectorAgent(LeaderAgent):
                 print(token, end="", flush=True)
         """
         from tantra.core.llm import chat
+        from tantra.core.agent_loader import AgentConfigLoader
+
+        # Hot-reload: reads soul.md + skills.md + policy.md + memory.md fresh from disk
+        # every single call. Edit any file on the host → next chat turn picks it up.
+        # Zero restart needed. The DIRECTOR_CHAT_SYSTEM_PROMPT constant is kept as
+        # a legacy fallback but is no longer used in the live path.
+        _loader = AgentConfigLoader("director")
+        _system_prompt = _loader.build_system_prompt(include_learning=True)
 
         # Base system prompt + optional live DB context as a second system message
         # (OpenAI / LiteLLM supports multiple system messages)
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": DIRECTOR_CHAT_SYSTEM_PROMPT},
+            {"role": "system", "content": _system_prompt},
         ]
         if live_context:
             messages.append({"role": "system", "content": live_context})

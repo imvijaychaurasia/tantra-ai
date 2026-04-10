@@ -205,6 +205,7 @@ services:
       - ./config:/app/config      # writable — tantra config model/sync-models writes here
       - ./scripts:/app/scripts:ro  # tantra config sync-models calls generate_litellm_config.py
       - ./data/uploads:/app/uploads
+      - ./agents:/app/agents      # hot-reload: agent config files (soul/skills/policy/memory/etc)
     ports:
       - "${API_PORT:-8000}:8000"
     env_file: .env
@@ -248,6 +249,7 @@ services:
     volumes:
       - ./src:/app/src:ro
       - ./skills:/app/skills:ro
+      - ./agents:/app/agents      # hot-reload: agent config files
       - ./data/media:/data/media    # upload_youtube_video reads MP4 files produced by tantra-media
     env_file: .env
     environment:
@@ -290,6 +292,7 @@ services:
     volumes:
       - ./src:/app/src:ro
       - ./skills:/app/skills:ro
+      - ./agents:/app/agents      # hot-reload: agent config files
     # CRITICAL: Beat must load .env so it has DB, Zernio, LiteLLM, and all
     # other credentials available when it fires scheduled tasks.
     env_file: .env

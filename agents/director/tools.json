@@ -1,0 +1,45 @@
+{
+  "description": "Director agent tool bindings — Celery task types the Director can dispatch",
+  "tools": [
+    {
+      "name": "research_draft",
+      "celery_task": "tantra.tasks.social.research_draft_post",
+      "description": "4-agent research crew: research a topic, draft a LinkedIn post, queue for approval",
+      "inputs": {
+        "topic": "string — research topic or angle",
+        "tone": "string (optional) — tone override: professional|personal|story"
+      },
+      "queue": "default"
+    },
+    {
+      "name": "progress_post",
+      "celery_task": "tantra.tasks.social.post_progress_update",
+      "description": "Auto-generate and post a Tantra AI build progress update to LinkedIn",
+      "inputs": {
+        "milestone": "string — what was built/shipped",
+        "tone": "string (optional)"
+      },
+      "queue": "default"
+    },
+    {
+      "name": "youtube_script",
+      "celery_task": "tantra.tasks.youtube.generate_youtube_script",
+      "description": "4-agent YouTube crew: research topic, write script, SEO-optimize, quality review",
+      "inputs": {
+        "topic": "string — exact video topic (never reframed)",
+        "video_type": "string — slideshow|product_video|educational|visual_video|marketing_video",
+        "instructions": "string — ≤120 char director guidance"
+      },
+      "queue": "default"
+    },
+    {
+      "name": "analytics_review",
+      "celery_task": "tantra.tasks.director.analytics_review",
+      "description": "Pull LinkedIn and YouTube analytics, summarise performance, surface insights",
+      "inputs": {
+        "period": "string — week|month|all"
+      },
+      "queue": "default"
+    }
+  ]
+}
