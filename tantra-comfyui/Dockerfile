@@ -33,19 +33,12 @@ RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI.git
 WORKDIR /root/ComfyUI
 
 # ── Install ComfyUI Python dependencies ───────────────────────────────────
-# PyTorch is already installed in the base image — skip it from requirements
-RUN pip install --no-cache-dir \
-    aiohttp \
-    einops \
-    transformers>=4.28.1 \
-    safetensors>=0.4.2 \
-    kornia>=0.7.1 \
-    torchsde \
-    scipy \
-    tqdm \
-    psutil \
-    pillow \
-    spandrel
+# Use ComfyUI's own requirements.txt so we automatically pick up all current
+# and future deps (e.g. sqlalchemy, which was added in early 2026).
+# PyTorch / torchvision lines in requirements.txt are skipped because they're
+# already provided by the base image — we pass --extra-index-url as a no-op
+# safety net but the base image's torch takes precedence.
+RUN pip install --no-cache-dir -r requirements.txt
 
 # ── Directories (bind-mounted from host at runtime) ───────────────────────
 RUN mkdir -p \
