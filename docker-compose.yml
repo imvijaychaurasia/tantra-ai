@@ -154,14 +154,17 @@ services:
     depends_on:
       ollama:
         condition: service_healthy
+      postgres:
+        condition: service_healthy
     volumes:
       - ./config/litellm_config.yaml:/app/config.yaml:ro
     ports:
       - "${LITELLM_PORT:-4000}:4000"
     environment:
       LITELLM_CONFIG: /app/config.yaml
-      # No DATABASE_URL — we use LiteLLM as a pure model proxy (no analytics/spend DB)
-      # All model configs are in litellm_config.yaml, not the DB
+      # LiteLLM main-latest requires DATABASE_URL when LITELLM_MASTER_KEY is set.
+      # We still keep all model config in litellm_config.yaml (store_model_in_db: false).
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-tantra}:${POSTGRES_PASSWORD:-tantra_secret}@postgres:5432/${POSTGRES_DB:-tantra}"
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}

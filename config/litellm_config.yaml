@@ -19,7 +19,7 @@
 
 general_settings:
   master_key: "os.environ/LITELLM_MASTER_KEY"
-  # database_url intentionally omitted — pure model proxy, no Prisma dependency.
+  store_model_in_db: false          # keep all model config in this YAML, not Postgres
   disable_spend_logs: true
   disable_master_key_return: true
 
