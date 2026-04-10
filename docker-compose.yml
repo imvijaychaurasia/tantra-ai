@@ -465,10 +465,13 @@ services:
       COMFYUI_CLIP_T5: ${COMFYUI_CLIP_T5:-t5xxl_fp8_e4m3fn.safetensors}
       COMFYUI_CLIP_L: ${COMFYUI_CLIP_L:-clip_l.safetensors}
       COMFYUI_VAE: ${COMFYUI_VAE:-ae.safetensors}
-      COMFYUI_STEPS: ${COMFYUI_STEPS:-20}
-      COMFYUI_WIDTH: ${COMFYUI_WIDTH:-1280}
-      COMFYUI_HEIGHT: ${COMFYUI_HEIGHT:-720}
-      COMFYUI_TIMEOUT: ${COMFYUI_TIMEOUT:-180}
+      # 8 steps is sufficient quality for a composited background image.
+      # 768x432 reduces denoising VRAM by ~60% vs 1280x720; still sharp after
+      # Pillow upscale to 1920x1080 for the final slide.
+      COMFYUI_STEPS: ${COMFYUI_STEPS:-8}
+      COMFYUI_WIDTH: ${COMFYUI_WIDTH:-768}
+      COMFYUI_HEIGHT: ${COMFYUI_HEIGHT:-432}
+      COMFYUI_TIMEOUT: ${COMFYUI_TIMEOUT:-300}
     networks:
       tantra-net:
         ipv4_address: 172.28.0.50
@@ -510,7 +513,10 @@ services:
     ports:
       - "${COMFYUI_PORT:-8188}:8188"
     environment:
-      CLI_ARGS: "--listen 0.0.0.0 --port 8188"
+      # --lowvram: offload models to CPU RAM between operations so the full
+      # Flux pipeline (UNET ~13 GB + T5 4.6 GB + VAE + CLIP) fits in 16 GB VRAM.
+      # Without this flag ComfyUI keeps everything live → OOM on RTX 5070 Ti 16 GB.
+      CLI_ARGS: "--listen 0.0.0.0 --port 8188 --lowvram"
     networks:
       tantra-net:
         ipv4_address: 172.28.0.51
