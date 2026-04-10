@@ -1347,10 +1347,11 @@ async def _handle_chat_approval(director, history: list[dict], r, session_id: st
 
     extraction_prompt = (
         "The user has just confirmed approval — they typed an approval word (approve/go/execute).\n"
-        "Extract EVERY task that was proposed, requested, or discussed in this conversation "
-        "that should now be committed to the DB and dispatched to a worker.\n\n"
-        "Include any task the user asked to create or run, even if they did not say 'approved' "
-        "inline — the approval word they just typed covers all proposed tasks.\n\n"
+        "Extract tasks from this conversation that should NOW be committed to the DB.\n\n"
+        "CRITICAL DEDUP RULE: The conversation history may contain [COMMITTED] assistant messages "
+        "listing tasks already saved to the DB. DO NOT re-extract those tasks. "
+        "If a [COMMITTED] note already covers a task type+topic, return [] for that task — "
+        "skip it entirely. Only extract tasks that are NEW (not yet in any [COMMITTED] note).\n\n"
         "Return ONLY a JSON array (no commentary, no markdown fences):\n"
         "[\n"
         "  {\n"
@@ -1463,7 +1464,7 @@ async def _handle_chat_approval(director, history: list[dict], r, session_id: st
         )
 
     try:
-        from datetime import datetime
+        from datetime import datetime, timedelta
 
         from sqlalchemy import create_engine, select
         from sqlalchemy.orm import sessionmaker
@@ -1481,10 +1482,30 @@ async def _handle_chat_approval(director, history: list[dict], r, session_id: st
             ).scalar_one_or_none()
 
             now = datetime.utcnow()
+            created_count = 0
+            skipped_dedup = []
             for t in valid_tasks:
+                task_type = t.get("task_type", "research_draft")
+                # ── DB-level dedup guard ──────────────────────────────────────
+                # Block double-insert: if a pending/in_progress task of the same
+                # type was created within the last 30 minutes (same chat session
+                # window), skip it.  This catches cases where the LLM ignores the
+                # [COMMITTED] note despite the extraction prompt warning.
+                recent_cutoff = now - timedelta(minutes=30)
+                existing = db_session.execute(
+                    select(AgentTask)
+                    .where(AgentTask.task_type == task_type)
+                    .where(AgentTask.status.in_(["pending", "in_progress"]))
+                    .where(AgentTask.scheduled_for >= recent_cutoff)
+                    .limit(1)
+                ).scalar_one_or_none()
+                if existing:
+                    skipped_dedup.append(task_type)
+                    continue
+                # ─────────────────────────────────────────────────────────────
                 db_session.add(AgentTask(
                     plan_id=plan.id if plan else None,
-                    task_type=t.get("task_type", "research_draft"),
+                    task_type=task_type,
                     assigned_to=t.get("assigned_to", "social_crew"),
                     priority=t.get("priority", "medium"),
                     instructions=t.get("instructions", ""),
@@ -1492,10 +1513,21 @@ async def _handle_chat_approval(director, history: list[dict], r, session_id: st
                     scheduled_for=now,
                     status="pending",
                 ))
+                created_count += 1
             db_session.commit()
 
+        if skipped_dedup:
+            console.print(
+                f"\n[yellow]⚠ Skipped {len(skipped_dedup)} duplicate task(s) "
+                f"(already pending within last 30 min):[/yellow] "
+                + ", ".join(skipped_dedup)
+            )
+        if created_count == 0 and skipped_dedup:
+            console.print("[dim]Nothing new to commit — all tasks already queued.[/dim]")
+            return
+
         console.print(
-            f"\n[green]✓[/green] Created [cyan]{len(valid_tasks)}[/cyan] AgentTask(s) → pending.\n"
+            f"\n[green]✓[/green] Created [cyan]{created_count}[/cyan] AgentTask(s) → pending.\n"
             "[dim]Dispatch now:[/dim]  "
             "[cyan]tantra task run dispatch_due_tasks --wait[/cyan]"
         )
@@ -1504,10 +1536,12 @@ async def _handle_chat_approval(director, history: list[dict], r, session_id: st
         # This prevents the NEXT approval trigger in the same session from
         # re-extracting and re-creating the exact same tasks.
         # The Director will see this note and return [] on the next extraction.
+        # Only include actually-created tasks in the committed note (not dedup-skipped ones)
+        committed_tasks_for_note = [t for t in valid_tasks if t.get("task_type") not in skipped_dedup]
         committed_summary = ", ".join(
             f"{t.get('task_type')} ({t.get('priority','medium')})"
-            for t in valid_tasks
-        )
+            for t in committed_tasks_for_note
+        ) or "none (all were duplicates)"
         history.append({
             "role": "assistant",
             "content": (
