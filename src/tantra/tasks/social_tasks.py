@@ -453,6 +453,32 @@ def research_and_draft_posts(
         _delete_research_checkpoint(ckpt_key)
         logger.debug("Research checkpoint cleared after successful DB insert.")
 
+    # ── Reflection: crew agents self-assess after each research+draft run ────
+    # Write a structured entry to each crew agent's reflection.md so the
+    # weekly learning consolidation task can synthesise patterns over time.
+    try:
+        from tantra.core.agent_loader import AgentConfigLoader
+        reflection_content = (
+            f"## Task: research_and_draft_posts\n"
+            f"**topic_hint**: {topic_hint!r}\n"
+            f"**platform**: {platform}\n"
+            f"**drafts_created**: {len(created_items)}\n"
+            f"**restored_from_checkpoint**: {restored_from_checkpoint}\n\n"
+            f"### Observations\n"
+            f"- Produced {len(created_items)} LinkedIn draft(s) for topic: {topic_hint!r}\n"
+            f"- Crew ran {'from checkpoint' if restored_from_checkpoint else 'fresh'}\n\n"
+            f"### Open questions\n"
+            f"- Were the post hooks strong enough to drive engagement?\n"
+            f"- Did the 3 drafts offer genuinely different angles?\n"
+        )
+        for agent_path in ["social-crew/researcher", "social-crew/drafter"]:
+            AgentConfigLoader(agent_path).append_reflection(
+                content=reflection_content,
+                comment=f"research_draft task — topic={topic_hint!r}",
+            )
+    except Exception as _ref_exc:
+        logger.debug("Reflection write failed (non-fatal): %s", _ref_exc)
+
     return {
         "success": True,
         "items_created": len(created_items),

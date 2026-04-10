@@ -164,6 +164,16 @@ app.conf.beat_schedule = {
         "options": {"queue": "agents"},
     },
 
+    # ── Multi-Agent Framework: Learning consolidation ─────────────────────────
+    # Sunday 3 AM — reads all reflection.md logs written during the week,
+    # synthesises verified patterns via LLM, writes updated learning.md per agent.
+    # Those learnings are injected into each agent's system prompt on the next run.
+    "agent-learning-consolidation": {
+        "task": "tantra.tasks.agent.consolidate_agent_learnings",
+        "schedule": crontab(hour=3, minute=0, day_of_week="0"),  # Sunday 3 AM
+        "options": {"queue": "scheduled"},
+    },
+
     # ── Phase 3: YouTube content pipeline ────────────────────────────────────
     # YouTube script generation fires when dispatch_due_tasks picks up a
     # youtube_script AgentTask created by Director weekly_planning or chat.
@@ -325,6 +335,130 @@ def consolidate_memories(self: Celery) -> dict:
     """
     # TODO: implement episodic → semantic memory consolidation
     return {"success": True, "message": "Memory consolidation complete"}
+
+
+@app.task(bind=True, name="tantra.tasks.agent.consolidate_agent_learnings", queue="scheduled")
+def consolidate_agent_learnings(self: Celery) -> dict:
+    """
+    Weekly learning consolidation — Sunday 3 AM.
+
+    For each agent with a reflection.md, reads all reflection entries written
+    since the last consolidation, calls the LLM (worker tier) to extract
+    durable patterns, and writes an updated learning.md.
+
+    Those patterns are injected into the agent's system prompt on the next run
+    via AgentConfigLoader.build_system_prompt(include_learning=True).
+
+    Safe to run even when reflection.md is empty or has only stub content.
+    """
+    import re
+    from datetime import datetime
+    from pathlib import Path
+
+    import litellm
+
+    from tantra.core.agent_loader import AgentConfigLoader
+    from tantra.core.config import ModelTier, settings
+
+    logger.info("consolidate_agent_learnings: starting")
+
+    base_url = f"{settings.litellm_base_url}/v1"
+    api_key = settings.litellm_key
+
+    # All agents that participate in the reflection loop
+    agent_paths = [
+        "director",
+        "youtube-crew/researcher",
+        "youtube-crew/script-writer",
+        "youtube-crew/seo-optimizer",
+        "youtube-crew/quality-reviewer",
+        "social-crew/researcher",
+        "social-crew/drafter",
+    ]
+
+    results = {}
+    consolidation_date = datetime.utcnow().strftime("%Y-%m-%d")
+
+    for agent_path in agent_paths:
+        try:
+            loader = AgentConfigLoader(agent_path)
+            reflection_text = loader.reflection
+
+            # Skip agents with no real reflection content yet
+            if not reflection_text or len(reflection_text.strip()) < 100:
+                logger.debug("consolidate_agent_learnings: skipping %s (no reflection content)", agent_path)
+                results[agent_path] = "skipped (no reflection content)"
+                continue
+
+            # Skip placeholder-only reflection files
+            if "No reflections" in reflection_text or "_No " in reflection_text:
+                results[agent_path] = "skipped (placeholder only)"
+                continue
+
+            # Build consolidation prompt
+            existing_learning = loader.learning or ""
+            system_prompt = (
+                "You are a learning synthesis engine for an AI agent system.\n"
+                "Your job is to read an agent's reflection log and distil durable patterns "
+                "that will improve the agent's future performance.\n\n"
+                "Output a markdown document with exactly these three sections:\n"
+                "## Verified Patterns (high confidence — inject into system prompt)\n"
+                "- Bullet list of patterns observed 2+ times across reflections\n\n"
+                "## Hypotheses (1 observation — being tested)\n"
+                "- Bullet list of tentative patterns to watch\n\n"
+                "## Abandoned Approaches (tried, didn't work)\n"
+                "- Bullet list of approaches explicitly noted as failures\n\n"
+                "Be specific and actionable. No generic advice. Max 300 words total."
+            )
+            user_prompt = (
+                f"Agent: {agent_path}\n"
+                f"Consolidation date: {consolidation_date}\n\n"
+                f"=== REFLECTION LOG (last 3000 chars) ===\n"
+                f"{reflection_text[-3000:]}\n\n"
+                f"=== EXISTING LEARNING (carry forward what's still valid) ===\n"
+                f"{existing_learning[-1500:] if existing_learning else '(none yet)'}\n\n"
+                f"Synthesise the reflection log into updated learning.md content. "
+                f"Preserve still-valid patterns from existing learning. "
+                f"Remove patterns that reflections show are no longer accurate."
+            )
+
+            response = litellm.completion(
+                model=f"openai/{ModelTier.worker.value}",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt + " /no_think"},
+                ],
+                api_base=base_url,
+                api_key=api_key,
+                max_tokens=600,
+                temperature=0.3,
+            )
+            synthesised = response.choices[0].message.content.strip()
+
+            # Strip any residual thinking blocks
+            synthesised = re.sub(r"<think>.*?</think>", "", synthesised, flags=re.DOTALL | re.IGNORECASE).strip()
+
+            if len(synthesised) < 50:
+                logger.warning("consolidate_agent_learnings: LLM returned short output for %s, skipping", agent_path)
+                results[agent_path] = "skipped (LLM output too short)"
+                continue
+
+            # Write the updated learning.md (full overwrite — it's synthesised, not append-only)
+            new_learning = (
+                f"# Learning — {agent_path}\n"
+                f"_Last consolidated: {consolidation_date}_\n\n"
+                f"{synthesised}\n"
+            )
+            loader.write_file("learning.md", new_learning, comment=f"weekly consolidation {consolidation_date}", actor="system")
+            logger.info("consolidate_agent_learnings: updated learning.md for %s", agent_path)
+            results[agent_path] = "updated"
+
+        except Exception as exc:
+            logger.error("consolidate_agent_learnings: failed for %s: %s", agent_path, exc, exc_info=True)
+            results[agent_path] = f"error: {exc}"
+
+    logger.info("consolidate_agent_learnings: complete — %s", results)
+    return {"success": True, "results": results, "date": consolidation_date}
 
 
 @app.task(bind=True, name="tantra.tasks.agent.generate_content_ideas", queue="agents")

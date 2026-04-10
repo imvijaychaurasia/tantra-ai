@@ -282,6 +282,39 @@ def generate_youtube_script(agent_task_id: str) -> dict[str, Any]:
         except Exception:
             pass
 
+        # ── Reflection: crew agents self-assess after each script ─────────────
+        # Write a structured entry to each crew agent's reflection.md so the
+        # weekly learning consolidation task can synthesise patterns over time.
+        try:
+            from tantra.core.agent_loader import AgentConfigLoader
+            scene_count = len(script_data.get("scenes", []))
+            reflection_content = (
+                f"## Task: Generate YouTube script — \"{video.title}\"\n"
+                f"**topic_hint**: {topic_hint!r}\n"
+                f"**video_type**: {video_type}\n"
+                f"**scene_count**: {scene_count}\n"
+                f"**status**: scripted (awaiting approval)\n\n"
+                f"### Observations\n"
+                f"- Script produced with {scene_count} scenes for topic: {topic_hint!r}\n"
+                f"- video_type routing: {video_type}\n"
+                f"- Tags count: {len(script_data.get('tags', []))}\n\n"
+                f"### Open questions\n"
+                f"- Will audience respond to this angle?\n"
+                f"- Are visual_description fields specific enough for image generation?\n"
+            )
+            for agent_path in [
+                "youtube-crew/researcher",
+                "youtube-crew/script-writer",
+                "youtube-crew/seo-optimizer",
+                "youtube-crew/quality-reviewer",
+            ]:
+                AgentConfigLoader(agent_path).append_reflection(
+                    content=reflection_content,
+                    comment=f"youtube_script task — {video.title[:60]}",
+                )
+        except Exception as _ref_exc:
+            logger.debug("Reflection write failed (non-fatal): %s", _ref_exc)
+
         return {
             "success": True,
             "youtube_video_id": video_id,

@@ -15,6 +15,7 @@ from __future__ import annotations
 from crewai import LLM, Agent, Crew, Process, Task
 from crewai.tools import tool
 
+from tantra.core.agent_loader import AgentConfigLoader
 from tantra.core.config import ModelTier, settings
 from tantra.tools.youtube import youtube_search
 
@@ -103,14 +104,16 @@ def build_social_media_crew(
     llm_base = f"{settings.litellm_base_url}/v1"
     llm_key = settings.litellm_key
 
+    # Hot-reload: backstories read fresh from agents/ config files on every crew build.
+    # Edit soul.md/skills.md on host → next research_draft task picks up the change.
+    _researcher_cfg = AgentConfigLoader("social-crew/researcher")
+    _drafter_cfg = AgentConfigLoader("social-crew/drafter")
+
     # ── Researcher ────────────────────────────────────────────────────────────
     researcher = Agent(
         role="Research Analyst",
         goal="Identify trending topics, viral content patterns, and audience pain points",
-        backstory=(
-            "You are a sharp research analyst who spots trends before they go mainstream. "
-            "You use data to back every recommendation and present findings clearly."
-        ),
+        backstory=_researcher_cfg.build_crewai_backstory(),
         llm=_make_llm(ModelTier.manager, llm_base, llm_key),
         tools=[search_youtube_trends],
         max_iter=5,
@@ -125,12 +128,7 @@ def build_social_media_crew(
             "Write compelling LinkedIn posts and YouTube scripts that drive "
             "engagement, comments, and shares"
         ),
-        backstory=(
-            "You are a skilled content creator who writes with the perfect balance of "
-            "expertise and human touch. You know that the best LinkedIn posts tell a story, "
-            "have a strong hook, and end with a call to action. For YouTube, you write "
-            "attention-grabbing scripts with a strong thumbnail concept."
-        ),
+        backstory=_drafter_cfg.build_crewai_backstory(),
         llm=_make_llm(ModelTier.worker, llm_base, llm_key),
         max_iter=5,
         verbose=verbose,
