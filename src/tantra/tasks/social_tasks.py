@@ -750,19 +750,30 @@ def _mark_commented(post_id: str, ttl_seconds: int = 86400 * 7) -> None:
         logger.warning("Redis mark_commented failed: %s", exc)
 
 
-def _llm_generate(prompt: str, system: str, max_tokens: int = 200) -> str:
-    """Call LiteLLM proxy (worker tier) for a quick text generation."""
+def _llm_generate(prompt: str, system: str, max_tokens: int = 800) -> str:
+    """Call LiteLLM proxy (worker tier) for a quick text generation.
+
+    max_tokens default raised to 800 (from 200) to give qwen3 room for
+    both its thinking block AND the visible response — qwen3 thinking mode
+    consumes tokens before producing output, so low budgets result in empty
+    responses.  The /no_think suffix disables thinking mode explicitly for
+    models that honour it (qwen3, deepseek-r1).
+    """
     import litellm
     from tantra.core.config import settings, ModelTier
 
     base_url = f"{settings.litellm_base_url}/v1"
     api_key = settings.litellm_key
 
+    # Append /no_think to disable qwen3/deepseek-r1 chain-of-thought mode.
+    # This is a no-op for models that don't recognise it.
+    prompt_with_hint = prompt.rstrip() + " /no_think"
+
     response = litellm.completion(
         model=f"openai/{ModelTier.worker.value}",
         messages=[
             {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": prompt_with_hint},
         ],
         api_base=base_url,
         api_key=api_key,
@@ -785,8 +796,15 @@ _LLM_GARBAGE_PATTERNS = [
 
 
 def _clean_llm_output(text: str) -> str:
-    """Strip common LLM meta-commentary artifacts from generated text."""
+    """Strip common LLM meta-commentary artifacts from generated text.
+
+    Also strips qwen3 thinking-mode blocks (<think>...</think>) that appear
+    when max_tokens is too small to fit both reasoning and visible response.
+    """
     import re
+    # Strip qwen3/deepseek thinking blocks — these appear when the model runs
+    # in thinking mode and must be removed before publishing.
+    text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL | re.IGNORECASE)
     for pattern in _LLM_GARBAGE_PATTERNS:
         text = re.sub(pattern, "", text, flags=re.DOTALL | re.IGNORECASE)
     return text.strip().strip('"').strip("'")

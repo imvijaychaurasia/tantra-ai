@@ -121,6 +121,8 @@ model_list:
   # ---------------------------------------------------------------------------
   # WORKER — Focused single-task execution
   # Primary: Qwen3-14B (128K ctx)
+  # thinking disabled: worker tasks are short-output (LinkedIn posts, summaries)
+  # and qwen3 thinking mode exhausts the token budget before producing output.
   # ---------------------------------------------------------------------------
   - model_name: worker
     litellm_params:
@@ -129,8 +131,10 @@ model_list:
       stream: true
       max_tokens: 4096
       temperature: 0.4
+      extra_body:
+        think: false          # disable qwen3 chain-of-thought for fast text gen
     model_info:
-      description: "Worker — Qwen3-14B (128K ctx, post writers, analyzers)"
+      description: "Worker — Qwen3-14B (128K ctx, post writers, analyzers, thinking OFF)"
 
   # ---------------------------------------------------------------------------
   # CODER — Code generation, debugging, infra scripting
