@@ -593,6 +593,53 @@ class DirectorAgent(LeaderAgent):
         except Exception as exc:
             lines.append(f"(Could not load system state: {exc})")
 
+        # ── YouTube pipeline state ────────────────────────────────────────────
+        try:
+            from sqlalchemy import create_engine
+            from sqlalchemy.orm import sessionmaker
+            from tantra.core.config import settings
+            from tantra.db.social import YouTubeVideo
+
+            _engine = create_engine(settings.database_sync_url, echo=False)
+            _Session = sessionmaker(bind=_engine)
+            with _Session() as _sess:
+                # Scripted videos awaiting human approval
+                scripted = _sess.execute(
+                    select(YouTubeVideo)
+                    .where(YouTubeVideo.status == "scripted")
+                    .order_by(YouTubeVideo.created_at.asc())
+                ).scalars().all()
+
+                # Active production pipeline
+                in_pipe = _sess.execute(
+                    select(YouTubeVideo)
+                    .where(YouTubeVideo.status.in_(["approved", "producing", "produced", "uploading"]))
+                    .order_by(YouTubeVideo.created_at.asc())
+                ).scalars().all()
+
+                # Count live videos
+                from sqlalchemy import func
+                live_count = _sess.execute(
+                    select(func.count()).select_from(YouTubeVideo)
+                    .where(YouTubeVideo.status == "live")
+                ).scalar() or 0
+
+                lines.append(f"\nYouTube pipeline: {live_count} live")
+                if scripted:
+                    lines.append(
+                        f"AWAITING YOUR APPROVAL ({len(scripted)} scripted videos — say 'approve videos' to approve all):"
+                    )
+                    for v in scripted:
+                        lines.append(f"  • [{v.id}] {v.title} ({len((v.script or {}).get('scenes', []))} scenes)")
+                if in_pipe:
+                    lines.append(f"In production ({len(in_pipe)}):")
+                    for v in in_pipe:
+                        lines.append(f"  • [{v.status}] {v.title}")
+                if not scripted and not in_pipe:
+                    lines.append("No videos awaiting approval or in production.")
+        except Exception as exc:
+            lines.append(f"(YouTube pipeline state unavailable: {exc})")
+
         return "\n".join(lines)
 
     async def review_week(

@@ -1560,6 +1560,80 @@ async def _handle_chat_approval(director, history: list[dict], r, session_id: st
     except Exception as exc:
         console.print(f"[red]DB error creating tasks: {exc}[/red]")
 
+    # ── Video approval step ───────────────────────────────────────────────────
+    # After AgentTask dispatch, check for scripted YouTube videos.
+    # If any exist, approve them all via the API so the production pipeline
+    # (TTS → slides → MP4 → upload) starts immediately — no manual curl needed.
+    try:
+        from sqlalchemy import create_engine, select
+        from sqlalchemy.orm import sessionmaker
+        from tantra.core.config import settings as _cfg
+        from tantra.db.social import YouTubeVideo
+        import httpx as _httpx
+
+        _engine = create_engine(_cfg.database_sync_url, echo=False)
+        _Sess = sessionmaker(bind=_engine)
+        with _Sess() as _db:
+            scripted_videos = _db.execute(
+                select(YouTubeVideo).where(YouTubeVideo.status == "scripted")
+                .order_by(YouTubeVideo.created_at.asc())
+            ).scalars().all()
+
+        if scripted_videos:
+            console.print(
+                f"\n[bold yellow]🎬 {len(scripted_videos)} video(s) awaiting approval:[/bold yellow]"
+            )
+            for v in scripted_videos:
+                scene_count = len((v.script or {}).get("scenes", []))
+                console.print(f"  [cyan]{v.title}[/cyan] ([dim]{scene_count} scenes[/dim])")
+
+            # Auto-approve: 'approve'/'go'/'execute' in director chat covers
+            # both AgentTask dispatch AND scripted video approval.
+            api_base = getattr(_cfg, "api_base_url", "http://localhost:8000")
+            approved_videos = []
+            failed_videos = []
+            for v in scripted_videos:
+                try:
+                    resp = _httpx.post(
+                        f"{api_base}/api/v1/youtube/{v.id}/approve",
+                        json={"approved_by": "director_chat", "notes": "approved via director chat"},
+                        timeout=10,
+                    )
+                    if resp.status_code == 200:
+                        approved_videos.append(v.title)
+                    else:
+                        failed_videos.append(f"{v.title} ({resp.status_code})")
+                except Exception as _ve:
+                    failed_videos.append(f"{v.title} ({_ve})")
+
+            if approved_videos:
+                console.print(
+                    f"\n[green]✓[/green] Approved [cyan]{len(approved_videos)}[/cyan] video(s) → production queued:\n"
+                    + "\n".join(f"  • {t}" for t in approved_videos)
+                )
+                # Inject approval note into history
+                history.append({
+                    "role": "assistant",
+                    "content": (
+                        f"[VIDEO_APPROVED] Approved {len(approved_videos)} scripted video(s) for production: "
+                        + ", ".join(f'"{t}"' for t in approved_videos)
+                        + ". TTS + slides + MP4 generation queued in tantra-media."
+                    ),
+                })
+                try:
+                    _hk = f"tantra:director:chat:{session_id}:history"
+                    r.setex(_hk, chat_ttl, json.dumps(history))
+                except Exception:
+                    pass
+            if failed_videos:
+                console.print(
+                    f"[yellow]⚠ Failed to approve {len(failed_videos)} video(s):[/yellow] "
+                    + ", ".join(failed_videos)
+                )
+    except Exception as _ve:
+        # Non-fatal — AgentTask dispatch already succeeded
+        console.print(f"[dim]Video approval check failed (non-fatal): {_ve}[/dim]")
+
 
 async def _director_chat_session(resume_session_id: Optional[str]) -> None:
     """
