@@ -14,14 +14,14 @@
 # Pending pulls (will add back when VRAM budget allows):
 #   deepseek-coder-v2:16b, phi4:14b, mistral-nemo:12b, qwen2.5:72b, llama3.3:70b
 #
-# Last config update: 2026-04-05 — stripped unpulled models to fix routing errors
+# Last config update: 2026-04-11 — removed master_key (internal-only net, no auth needed)
 # =============================================================================
 
 general_settings:
-  master_key: "os.environ/LITELLM_MASTER_KEY"
+  # No master_key — LiteLLM is internal-only (Docker net 172.28.0.0/16).
+  # Auth removed to avoid main-latest DB-validation-of-master-key breakage.
   store_model_in_db: false          # keep all model config in this YAML, not Postgres
   disable_spend_logs: true
-  disable_master_key_return: true
 
 litellm_settings:
   set_verbose: false

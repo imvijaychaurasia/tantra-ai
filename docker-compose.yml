@@ -149,12 +149,13 @@ services:
   # ---------------------------------------------------------------------------
   litellm:
     <<: *restart
-    image: ghcr.io/berriai/litellm:main-latest
+    # Pinned to stable release — avoids main-latest DB-validation breaking changes.
+    # No LITELLM_MASTER_KEY: LiteLLM is internal-only (172.28.0.0/16 Docker net),
+    # no external access, so auth is unnecessary and only causes DB-related pain.
+    image: ghcr.io/berriai/litellm:main-v1.63.14-stable
     container_name: tantra-litellm
     depends_on:
       ollama:
-        condition: service_healthy
-      postgres:
         condition: service_healthy
     volumes:
       - ./config/litellm_config.yaml:/app/config.yaml:ro
@@ -162,16 +163,10 @@ services:
       - "${LITELLM_PORT:-4000}:4000"
     environment:
       LITELLM_CONFIG: /app/config.yaml
-      # LiteLLM main-latest requires DATABASE_URL when LITELLM_MASTER_KEY is set.
-      # Uses its OWN 'litellm' database — keeps Prisma migrations isolated from
-      # Tantra's SQLAlchemy tables (weekly_plans, agent_tasks, youtube_videos, etc.).
-      # The 'litellm' DB is created by data/postgres-init/01_create_litellm_db.sql.
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-tantra}:${POSTGRES_PASSWORD:-tantra_secret}@postgres:5432/litellm"
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       TOGETHER_API_KEY: ${TOGETHER_API_KEY:-}
-      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-tantra-master-key}
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
     networks:
       tantra-net:
