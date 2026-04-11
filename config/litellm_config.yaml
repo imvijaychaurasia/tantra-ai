@@ -73,7 +73,7 @@ model_list:
 
   - model_name: frontier
     litellm_params:
-      model: ollama/qwen3:30b
+      model: ollama_chat/qwen3:30b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 8192
@@ -98,7 +98,7 @@ model_list:
 
   - model_name: director
     litellm_params:
-      model: ollama/qwen3:30b
+      model: ollama_chat/qwen3:30b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 8192
@@ -115,7 +115,7 @@ model_list:
   # ---------------------------------------------------------------------------
   - model_name: manager
     litellm_params:
-      model: ollama/qwen3:14b
+      model: ollama_chat/qwen3:14b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 8192
@@ -133,7 +133,7 @@ model_list:
   # ---------------------------------------------------------------------------
   - model_name: worker
     litellm_params:
-      model: ollama/qwen3:14b
+      model: ollama_chat/qwen3:14b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 4096
@@ -151,7 +151,7 @@ model_list:
   # ---------------------------------------------------------------------------
   - model_name: coder
     litellm_params:
-      model: ollama/qwen3:30b
+      model: ollama_chat/qwen3:30b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 4096
@@ -164,7 +164,7 @@ model_list:
 
   - model_name: coder
     litellm_params:
-      model: ollama/qwen3:14b
+      model: ollama_chat/qwen3:14b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 4096
@@ -179,7 +179,7 @@ model_list:
   # ---------------------------------------------------------------------------
   - model_name: fast
     litellm_params:
-      model: ollama/qwen3:4b
+      model: ollama_chat/qwen3:4b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 2048
