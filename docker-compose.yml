@@ -169,7 +169,7 @@ services:
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
       TOGETHER_API_KEY: ${TOGETHER_API_KEY:-}
-      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-tantra-master-key}
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:-sk-tantra-master-key}
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
     networks:
       tantra-net:
@@ -222,7 +222,7 @@ services:
       QDRANT_HOST: qdrant
       QDRANT_PORT: "6333"
       LITELLM_BASE_URL: http://litellm:4000
-      LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-tantra-master-key}
+      LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-tantra-master-key}
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-tantra_redis_secret}@redis:6379/1
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-tantra_redis_secret}@redis:6379/2
       LOG_FORMAT: "text"
@@ -262,7 +262,7 @@ services:
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-tantra_redis_secret}@redis:6379/1
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-tantra_redis_secret}@redis:6379/2
       LITELLM_BASE_URL: http://litellm:4000
-      LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-tantra-master-key}
+      LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-tantra-master-key}
     command: >
       celery -A tantra.tasks.celery_app worker
       --loglevel=${CELERY_LOG_LEVEL:-info}
@@ -306,7 +306,7 @@ services:
       CELERY_BROKER_URL: redis://:${REDIS_PASSWORD:-tantra_redis_secret}@redis:6379/1
       CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD:-tantra_redis_secret}@redis:6379/2
       LITELLM_BASE_URL: http://litellm:4000
-      LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-tantra-master-key}
+      LITELLM_API_KEY: ${LITELLM_MASTER_KEY:-sk-tantra-master-key}
     command: >
       celery -A tantra.tasks.celery_app beat
       --loglevel=${CELERY_LOG_LEVEL:-info}
@@ -332,7 +332,7 @@ services:
       - "${WEBUI_PORT:-3000}:8080"
     environment:
       OPENAI_API_BASE_URL: http://litellm:4000/v1
-      OPENAI_API_KEY: ${LITELLM_MASTER_KEY:-tantra-master-key}
+      OPENAI_API_KEY: ${LITELLM_MASTER_KEY:-sk-tantra-master-key}
       WEBUI_SECRET_KEY: ${SECRET_KEY:-change-me-please-use-a-long-random-string}
       ENABLE_SIGNUP: ${WEBUI_ENABLE_SIGNUP:-true}
       DEFAULT_MODELS: director
