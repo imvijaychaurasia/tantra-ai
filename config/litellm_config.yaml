@@ -73,13 +73,14 @@ model_list:
 
   - model_name: frontier
     litellm_params:
-      model: ollama_chat/qwen3:30b
+      model: ollama/qwen3:30b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 8192
       temperature: 0.7
       extra_body:
-        think: false          # disable thinking for consistent response times
+        options:
+          think: false        # disable qwen3 thinking via Ollama native options field
     model_info:
       description: "Local frontier fallback — Qwen3-30B MoE (8GB VRAM)"
 
@@ -98,14 +99,15 @@ model_list:
 
   - model_name: director
     litellm_params:
-      model: ollama_chat/qwen3:30b
+      model: ollama/qwen3:30b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 8192
       temperature: 0.6
       extra_body:
-        think: false          # disable qwen3 chain-of-thought — without this qwen3:30b
-                              # takes 2-3 min per generation due to internal reasoning tokens
+        options:
+          think: false        # Ollama native options.think — bypasses drop_params filtering
+                              # without this qwen3:30b takes 2-3 min per generation
     model_info:
       description: "Director local — Qwen3-30B MoE (8GB VRAM, 128K ctx)"
 
@@ -115,13 +117,14 @@ model_list:
   # ---------------------------------------------------------------------------
   - model_name: manager
     litellm_params:
-      model: ollama_chat/qwen3:14b
+      model: ollama/qwen3:14b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 8192
       temperature: 0.5
       extra_body:
-        think: false          # disable qwen3 chain-of-thought for responsive manager agents
+        options:
+          think: false        # Ollama native options.think — disable qwen3 chain-of-thought
     model_info:
       description: "Manager — Qwen3-14B (10GB VRAM, 128K ctx)"
 
@@ -133,13 +136,14 @@ model_list:
   # ---------------------------------------------------------------------------
   - model_name: worker
     litellm_params:
-      model: ollama_chat/qwen3:14b
+      model: ollama/qwen3:14b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 4096
       temperature: 0.4
       extra_body:
-        think: false          # disable qwen3 chain-of-thought for fast text gen
+        options:
+          think: false        # Ollama native options.think — disable qwen3 chain-of-thought
     model_info:
       description: "Worker — Qwen3-14B (128K ctx, post writers, analyzers, thinking OFF)"
 
@@ -151,20 +155,20 @@ model_list:
   # ---------------------------------------------------------------------------
   - model_name: coder
     litellm_params:
-      model: ollama_chat/qwen3:30b
+      model: ollama/qwen3:30b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 4096
       temperature: 0.2
       extra_body:
-        think: false          # disable thinking for coder — structured output tasks don't
-                              # benefit from chain-of-thought and it causes timeout issues
+        options:
+          think: false        # Ollama native options.think — structured output doesn't need CoT
     model_info:
       description: "Coder primary — Qwen3-30B (best available, pending deepseek pull)"
 
   - model_name: coder
     litellm_params:
-      model: ollama_chat/qwen3:14b
+      model: ollama/qwen3:14b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 4096
@@ -179,7 +183,7 @@ model_list:
   # ---------------------------------------------------------------------------
   - model_name: fast
     litellm_params:
-      model: ollama_chat/qwen3:4b
+      model: ollama/qwen3:4b
       api_base: "http://ollama:11434"
       stream: true
       max_tokens: 2048
