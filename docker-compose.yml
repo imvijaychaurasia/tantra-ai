@@ -163,8 +163,10 @@ services:
     environment:
       LITELLM_CONFIG: /app/config.yaml
       # LiteLLM main-latest requires DATABASE_URL when LITELLM_MASTER_KEY is set.
-      # We still keep all model config in litellm_config.yaml (store_model_in_db: false).
-      DATABASE_URL: "postgresql://${POSTGRES_USER:-tantra}:${POSTGRES_PASSWORD:-tantra_secret}@postgres:5432/${POSTGRES_DB:-tantra}"
+      # Uses its OWN 'litellm' database — keeps Prisma migrations isolated from
+      # Tantra's SQLAlchemy tables (weekly_plans, agent_tasks, youtube_videos, etc.).
+      # The 'litellm' DB is created by data/postgres-init/01_create_litellm_db.sql.
+      DATABASE_URL: "postgresql://${POSTGRES_USER:-tantra}:${POSTGRES_PASSWORD:-tantra_secret}@postgres:5432/litellm"
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       GROQ_API_KEY: ${GROQ_API_KEY:-}
